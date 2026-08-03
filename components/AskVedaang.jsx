@@ -48,9 +48,11 @@ const CATEGORIZED_PROMPTS = {
 const INITIAL_WELCOME = {
   role: "assistant",
   content:
-    "Hello! I am **Ask Vedaang**, an AI guide to Vedaang Sharma's engineering portfolio.\n\nAsk me about his **projects**, **published research**, **backend tech stack**, or **career background**! Click a suggested topic below or type your own question.",
-  citations: [],
-  confidence: "High",
+    "Hello! 👋 I am **Ask Vedaang**, an AI guide to Vedaang Sharma's engineering portfolio.\n\nAsk me about his **projects**, **published research**, **backend tech stack**, or **career background**! Click a suggested topic below or type your own question.",
+  bypassRag: true,
+  retrievedCount: 0,
+  confidenceLevel: "None",
+  confidenceScore: 0,
 };
 
 /**
@@ -90,18 +92,8 @@ function TypingIndicator() {
         <span className="w-2 h-2 rounded-full bg-[#FF8A00] animate-bounce" />
       </div>
       <span className="text-xs font-mono text-[#787467] dark:text-[#9E9A8B]">
-        Retrieving vector context & generating grounded answer...
+        Evaluating intent & processing query...
       </span>
-    </div>
-  );
-}
-
-function LoadingSkeleton() {
-  return (
-    <div className="space-y-2.5 p-4 rounded-2xl bg-[#F0EDD4]/60 dark:bg-[#1E1D19]/60 border border-[#E3DEC3]/60 dark:border-[#33312B]/60 animate-pulse">
-      <div className="h-4 bg-[#E3DEC3] dark:bg-[#2A2923] rounded-md w-3/4" />
-      <div className="h-4 bg-[#E3DEC3] dark:bg-[#2A2923] rounded-md w-full" />
-      <div className="h-4 bg-[#E3DEC3] dark:bg-[#2A2923] rounded-md w-5/6" />
     </div>
   );
 }
@@ -159,11 +151,36 @@ function ResearchCardLink({ title, url }) {
   );
 }
 
-function GroundingConfidenceBadge({ confidence = "High" }) {
+function GroundingConfidenceBadge({ confidenceLevel, confidenceScore, retrievedCount, bypassRag }) {
+  // Hide grounding badge if RAG was bypassed or no documents were retrieved
+  if (bypassRag || !retrievedCount || retrievedCount === 0 || !confidenceLevel || confidenceLevel === "None") {
+    return null;
+  }
+
+  const scorePct = Math.round((confidenceScore || 0) * 100);
+
+  if (confidenceLevel === "High") {
+    return (
+      <div className="flex items-center gap-1.5 text-[10px] font-mono font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20 w-fit mb-2">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+        <span>High Confidence Match ({scorePct}%)</span>
+      </div>
+    );
+  }
+
+  if (confidenceLevel === "Medium") {
+    return (
+      <div className="flex items-center gap-1.5 text-[10px] font-mono font-semibold px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20 w-fit mb-2">
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+        <span>Medium Confidence Match ({scorePct}%)</span>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex items-center gap-1.5 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20 w-fit mb-2">
-      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-      <span>{confidence} Grounding Match</span>
+    <div className="flex items-center gap-1.5 text-[10px] font-mono font-semibold px-2.5 py-0.5 rounded-full bg-stone-500/10 text-stone-700 dark:text-stone-400 border border-stone-500/20 w-fit mb-2">
+      <span className="w-1.5 h-1.5 rounded-full bg-stone-500" />
+      <span>Low Confidence Match ({scorePct}%)</span>
     </div>
   );
 }
@@ -259,6 +276,11 @@ export default function AskVedaang({ embedded = false }) {
 
       if (!response.ok) throw new Error(`Server returned status ${response.status}`);
 
+      const bypassRag = response.headers.get("x-rag-bypass") === "true";
+      const confidenceScore = parseFloat(response.headers.get("x-rag-confidence-score") || "0");
+      const confidenceLevel = response.headers.get("x-rag-confidence-level") || "None";
+      const retrievedCount = parseInt(response.headers.get("x-rag-retrieved-count") || "0", 10);
+
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let assistantResponse = "";
@@ -266,7 +288,14 @@ export default function AskVedaang({ embedded = false }) {
       // Add empty assistant response to stream into
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: "", citations: [], confidence: "High" },
+        {
+          role: "assistant",
+          content: "",
+          bypassRag,
+          confidenceScore,
+          confidenceLevel,
+          retrievedCount,
+        },
       ]);
 
       while (true) {
@@ -280,8 +309,10 @@ export default function AskVedaang({ embedded = false }) {
           updated[updated.length - 1] = {
             role: "assistant",
             content: assistantResponse,
-            citations: [],
-            confidence: "High",
+            bypassRag,
+            confidenceScore,
+            confidenceLevel,
+            retrievedCount,
           };
           return updated;
         });
@@ -295,8 +326,10 @@ export default function AskVedaang({ embedded = false }) {
           updated[updated.length - 1] = {
             role: "assistant",
             content: fallbackMsg,
-            citations: [],
-            confidence: "Grounded Directory",
+            bypassRag: true,
+            confidenceScore: 0,
+            confidenceLevel: "None",
+            retrievedCount: 0,
           };
           return updated;
         });
@@ -425,7 +458,14 @@ export default function AskVedaang({ embedded = false }) {
                   <ErrorRecoveryCard onRetry={handleSend} query={lastQuery} />
                 ) : (
                   <div>
-                    <GroundingConfidenceBadge confidence={msg.confidence || "High"} />
+                    {/* Grounding badge shown ONLY when retrieval actually occurs */}
+                    <GroundingConfidenceBadge
+                      confidenceLevel={msg.confidenceLevel}
+                      confidenceScore={msg.confidenceScore}
+                      retrievedCount={msg.retrievedCount}
+                      bypassRag={msg.bypassRag}
+                    />
+
                     <MarkdownRenderer content={msg.content || "..."} />
 
                     {/* Interactive Project Cards */}

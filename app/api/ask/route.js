@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { classifyIntent } from "@/lib/rag/intent";
 import { semanticSearch } from "@/lib/rag/search";
 import { answerQuestion } from "@/lib/ask/askEngine";
 
@@ -104,7 +105,7 @@ async function callGeminiLLM(userMessage, systemPrompt) {
 }
 
 /**
- * Main RAG Ask API POST handler
+ * Main RAG Ask API POST handler with Intent Classification Layer
  */
 export async function POST(request) {
   try {
@@ -118,26 +119,74 @@ export async function POST(request) {
       );
     }
 
-    // 1. Question -> Embedding -> Semantic search -> Top 5 documents
-    const searchResult = await semanticSearch(message, { limit: 5 });
+    // 1. INTENT CLASSIFICATION LAYER: Evaluate conversational vs portfolio query
+    const intentResult = classifyIntent(message);
+
+    // Helper to build stream response with metadata headers
+    const buildStreamResponse = (text, metadata = {}) => {
+      const encoder = new TextEncoder();
+      const finalAnswer = (text || "").trim();
+      const stream = new ReadableStream({
+        async start(controller) {
+          const chunks = finalAnswer.split(/(\s+)/);
+          for (const chunk of chunks) {
+            if (chunk) {
+              controller.enqueue(encoder.encode(chunk));
+              await new Promise((r) => setTimeout(r, 8));
+            }
+          }
+          controller.close();
+        },
+      });
+
+      return new NextResponse(stream, {
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          "X-Content-Type-Options": "nosniff",
+          "X-RAG-Bypass": metadata.bypass ? "true" : "false",
+          "X-RAG-Confidence-Score": String(metadata.confidenceScore ?? 0.0),
+          "X-RAG-Confidence-Level": metadata.confidenceLevel || "None",
+          "X-RAG-Retrieved-Count": String(metadata.retrievedCount ?? 0),
+          "X-Intent-Category": metadata.intentCategory || "portfolio_query",
+        },
+      });
+    };
+
+    // If intent is conversational (greetings, farewells, gratitude, etc.): BYPASS RAG completely
+    if (intentResult.bypassRag && intentResult.response) {
+      return buildStreamResponse(intentResult.response, {
+        bypass: true,
+        confidenceScore: 0.0,
+        confidenceLevel: "None",
+        retrievedCount: 0,
+        intentCategory: intentResult.category,
+      });
+    }
+
+    // 2. RAG PIPELINE: Question -> Embedding -> Semantic search with confidence threshold
+    const searchResult = await semanticSearch(message, { limit: 5, threshold: 0.20 });
     const retrievedContext = searchResult.context;
     const documents = searchResult.documents || [];
+    const count = searchResult.count || 0;
+    const confidenceScore = searchResult.confidenceScore || 0.0;
+    const confidenceLevel = searchResult.confidenceLevel || "None";
 
-    // 2. Prompt builder with ONLY retrieved context (Never send entire database)
+    // 3. Prompt builder with ONLY retrieved context
     const systemPrompt = buildGroundedSystemPrompt(retrievedContext);
 
-    // 3. Query LLM (Groq -> Gemini)
+    // 4. Query LLM (Groq -> Gemini)
     let answer = await callGroqLLM(message, systemPrompt);
     if (!answer) {
       answer = await callGeminiLLM(message, systemPrompt);
     }
 
-    // 4. Grounded fallback synthesizer if external LLM keys are absent/failed
+    // 5. Grounded fallback synthesizer if external LLM keys are absent/failed
     if (!answer || typeof answer !== "string" || !answer.trim()) {
       answer = answerQuestion(message, { documents, context: retrievedContext });
     }
 
-    // 5. Streaming response guarantee: Never produce blank responses
+    // 6. Guarantee non-empty response
     let finalAnswer = (answer || "").trim();
     if (!finalAnswer) {
       finalAnswer = `I couldn't find specific information matching your question in Vedaang's portfolio records.
@@ -149,27 +198,12 @@ Explore key sections:
 - **Resume**: Download [Vedaang's Resume PDF](/api/resume) or connect via the [Contact Page](/contact)`;
     }
 
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      async start(controller) {
-        // Stream text smoothly preserving whitespace and markdown chunks
-        const chunks = finalAnswer.split(/(\s+)/);
-        for (const chunk of chunks) {
-          if (chunk) {
-            controller.enqueue(encoder.encode(chunk));
-            await new Promise((r) => setTimeout(r, 8));
-          }
-        }
-        controller.close();
-      },
-    });
-
-    return new NextResponse(stream, {
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-cache, no-transform",
-        "X-Content-Type-Options": "nosniff",
-      },
+    return buildStreamResponse(finalAnswer, {
+      bypass: false,
+      confidenceScore,
+      confidenceLevel,
+      retrievedCount: count,
+      intentCategory: "portfolio_query",
     });
   } catch (error) {
     console.error("[POST /api/ask]", error);

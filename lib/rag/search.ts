@@ -41,6 +41,8 @@ export interface SearchResponse {
   documents: SearchResultItem[];
   context: string;
   count: number;
+  confidenceScore: number;
+  confidenceLevel: "High" | "Medium" | "Low" | "None";
 }
 
 /**
@@ -153,10 +155,10 @@ async function fallbackKnowledgeSearch(
 }
 
 /**
- * Executes Semantic Search Retrieval Engine.
+ * Executes Semantic Search Retrieval Engine with Confidence Threshold.
  * 
  * Flow:
- * Question -> Embedding -> Cosine Similarity Search -> Top K Documents -> Context
+ * Question -> Embedding -> Cosine Similarity Search -> Confidence Filtering -> Top K Documents -> Context
  *
  * Note: Does NOT call LLM text generation.
  */
@@ -166,7 +168,7 @@ export async function semanticSearch(
 ): Promise<SearchResponse> {
   const query = (question || "").trim();
   const limit = options.limit ?? options.topK ?? 5;
-  const threshold = options.threshold ?? 0.0;
+  const threshold = options.threshold ?? 0.20; // Default confidence threshold
   const filterInput = options.filter ?? options.categories;
   const filterTypes = normalizeTypeFilter(filterInput);
 
@@ -176,6 +178,8 @@ export async function semanticSearch(
       documents: [],
       context: "No search query provided.",
       count: 0,
+      confidenceScore: 0.0,
+      confidenceLevel: "None",
     };
   }
 
@@ -217,19 +221,38 @@ export async function semanticSearch(
     documents = await fallbackKnowledgeSearch(queryEmbedding, limit, threshold, filterTypes);
   }
 
-  // Ensure documents are sorted by similarity score descending and limited to Top K
+  // 4. Discard low-similarity documents below confidence threshold
   documents = documents
+    .filter((doc) => doc.similarityScore >= threshold)
     .sort((a, b) => b.similarityScore - a.similarityScore)
     .slice(0, limit);
 
-  // 4. Return context & document list
-  const context = formatRetrievalContext(documents);
+  // 5. Calculate retrieval confidence score & level
+  const topScore = documents.length > 0 ? documents[0].similarityScore : 0.0;
+  let confidenceLevel: "High" | "Medium" | "Low" | "None" = "None";
+
+  if (documents.length > 0) {
+    if (topScore >= 0.55) {
+      confidenceLevel = "High";
+    } else if (topScore >= 0.35) {
+      confidenceLevel = "Medium";
+    } else if (topScore >= threshold) {
+      confidenceLevel = "Low";
+    }
+  }
+
+  // 6. Return context & document list
+  const context = documents.length > 0
+    ? formatRetrievalContext(documents)
+    : "No relevant portfolio context found.";
 
   return {
     query,
     documents,
     context,
     count: documents.length,
+    confidenceScore: topScore,
+    confidenceLevel,
   };
 }
 

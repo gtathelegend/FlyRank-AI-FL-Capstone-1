@@ -23,23 +23,23 @@ import MarkdownRenderer from "@/components/MarkdownRenderer";
 
 const CATEGORIZED_PROMPTS = {
   Featured: [
-    "Who is Vedaang?",
-    "Tell me about Aegis Care",
-    "What research has he published?",
-    "What backend technologies does he use?",
+    "Tell me about yourself",
+    "Show your best project",
+    "Explain Posture Sense",
+    "How did you build your portfolio?",
   ],
   Projects: [
-    "Aegis Care overview & stack",
-    "Posture Sense engineering details",
-    "Show all production projects",
+    "Explain Posture Sense",
+    "Tell me about Aegis Care",
+    "What projects have you built?",
   ],
-  Research: [
-    "Published computer vision research",
-    "Deep learning & AI papers",
+  "Tech & AI": [
+    "What technologies do you enjoy using?",
+    "Tell me about your research",
+    "Show your certifications",
   ],
   Experience: [
-    "Software engineering internships",
-    "Certifications & credentials",
+    "What internship experience do you have?",
     "Resume & CV PDF",
     "How to contact Vedaang?",
   ],
@@ -48,7 +48,7 @@ const CATEGORIZED_PROMPTS = {
 const INITIAL_WELCOME = {
   role: "assistant",
   content:
-    "Hello! 👋 I am **Ask Vedaang**, an AI guide to Vedaang Sharma's engineering portfolio.\n\nAsk me about his **projects**, **published research**, **backend tech stack**, or **career background**! Click a suggested topic below or type your own question.",
+    "Hi! 👋\n\nI'm Vedaang.\n\nThanks for visiting my portfolio. I'm happy to answer questions about my projects, backend engineering work, AI research, internships, technical skills, certifications, or anything else you'd like to know.\n\nWhat would you like to explore?",
   bypassRag: true,
   retrievedCount: 0,
   confidenceLevel: "None",
@@ -92,7 +92,7 @@ function TypingIndicator() {
         <span className="w-2 h-2 rounded-full bg-[#FF8A00] animate-bounce" />
       </div>
       <span className="text-xs font-mono text-[#787467] dark:text-[#9E9A8B]">
-        Evaluating intent & processing query...
+        Vedaang is typing...
       </span>
     </div>
   );
@@ -320,7 +320,7 @@ export default function AskVedaang({ embedded = false }) {
 
       if (!assistantResponse.trim()) {
         const fallbackMsg =
-          "I couldn't find specific information matching your question in Vedaang's portfolio records. Try exploring his [projects](/projects), [published research](/research), [skills](/skills), or [contact](/contact).";
+          "I don't currently have that information documented in my portfolio. Feel free to explore my [projects](/projects), [published research](/research), [skills](/skills), or reach out on my [Contact Page](/contact).";
         setMessages((prev) => {
           const updated = [...prev];
           updated[updated.length - 1] = {
@@ -365,12 +365,12 @@ export default function AskVedaang({ embedded = false }) {
       <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#E3DEC3] dark:border-[#33312B] bg-[#F0EDD4] dark:bg-[#1C1B17]">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-[#FFC233] text-[#181713] flex items-center justify-center font-bold text-sm shadow-subtle">
-            <FontAwesomeIcon icon={faRobot} />
+            <FontAwesomeIcon icon={faUser} />
           </div>
           <div>
-            <h2 className="font-heading font-bold text-base leading-none">Ask Vedaang</h2>
+            <h2 className="font-heading font-bold text-base leading-none">Vedaang</h2>
             <span className="text-[10px] font-mono text-[#FF8A00] flex items-center gap-1.5 mt-0.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Production RAG Assistant
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Software Developer & AI Researcher
             </span>
           </div>
         </div>
@@ -473,7 +473,7 @@ export default function AskVedaang({ embedded = false }) {
                       <div className="mt-3 pt-2 border-t border-[#E3DEC3]/60 dark:border-[#33312B]/60">
                         <span className="text-[10px] font-mono uppercase tracking-wider text-[#787467] dark:text-[#9E9A8B] flex items-center gap-1 mb-1">
                           <FontAwesomeIcon icon={faFolder} className="text-[#FF8A00]" />
-                          Cited Projects:
+                          Related Project:
                         </span>
                         {projects.map((p, idx) => (
                           <ProjectCardLink key={idx} title={p.title} slug={p.slug} url={p.url} />
@@ -486,7 +486,7 @@ export default function AskVedaang({ embedded = false }) {
                       <div className="mt-3 pt-2 border-t border-[#E3DEC3]/60 dark:border-[#33312B]/60">
                         <span className="text-[10px] font-mono uppercase tracking-wider text-[#787467] dark:text-[#9E9A8B] flex items-center gap-1 mb-1">
                           <FontAwesomeIcon icon={faFileCode} className="text-[#FF8A00]" />
-                          Cited Research Papers:
+                          Related Research:
                         </span>
                         {research.map((r, idx) => (
                           <ResearchCardLink key={idx} title={r.title} url={r.url} />
@@ -564,7 +564,7 @@ export default function AskVedaang({ embedded = false }) {
         aria-label="Ask Vedaang AI Assistant"
       >
         <FontAwesomeIcon icon={faMessage} className="text-[#FFC233] dark:text-[#FF8A00]" />
-        <span className="font-heading font-bold text-xs tracking-wide">Ask Vedaang</span>
+        <span className="font-heading font-bold text-xs tracking-wide">Chat with Vedaang</span>
         <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
       </motion.button>
 

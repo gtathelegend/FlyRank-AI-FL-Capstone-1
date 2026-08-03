@@ -11,11 +11,11 @@ export default function AskPage() {
           <div className="max-w-3xl mb-8">
             <Heading
               level={1}
-              badge="AI Assistant"
+              badge="Conversational Portfolio Agent"
               badgeVariant="gold"
-              subtitle="Ask questions conversationally to explore Vedaang's engineering case studies, research papers, work experience, and tech stack."
+              subtitle="Chat conversationally to explore my engineering case studies, research papers, work experience, and backend tech stack."
             >
-              Ask Vedaang
+              Chat with Vedaang
             </Heading>
           </div>
 

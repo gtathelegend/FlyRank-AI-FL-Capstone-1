@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-This document presents a comprehensive architectural audit of the current **Ask Vedaang** AI assistant system within Vedaang Sharma's engineering portfolio codebase. It diagnoses the root causes behind blank and failing assistant responses, maps out the entire end-to-end request lifecycle, documents critical failure modes across all system layers, verifies all database queries and environment variables, and delivers a complete architectural blueprint for upgrading the assistant into a state-of-the-art, production-grade **Retrieval-Augmented Generation (RAG)** system powered dynamically by Supabase.
+This document presents a comprehensive architectural audit of the current **Ask Vedaang** AI assistant system within Vedaang Sharma's engineering portfolio codebase. It diagnoses the root causes behind blank and failing assistant responses, maps out the end-to-end request lifecycle, documents critical failure modes across all system layers, verifies all database queries and environment variables, and delivers an upgraded, production-grade **Retrieval-Augmented Generation (RAG)** architecture design powered dynamically by Supabase (`pgvector`), granular section-level semantic chunking, decoupled asynchronous worker ingestion, hybrid search with multi-stage re-ranking, conversation memory, query caching, and analytics logging.
 
 ---
 
@@ -87,7 +87,7 @@ if (!answer || typeof answer !== "string" || !answer.trim()) {
 
 ### 2. Complete Request Lifecycle Trace
 
-The lifecycle of a request through the system spans 7 distinct architectural stages:
+The current request lifecycle spans 7 stages:
 
 ```
 [ User Input ]
@@ -142,48 +142,13 @@ The lifecycle of a request through the system spans 7 distinct architectural sta
 └───────────────────────────────┘
 ```
 
-#### Detailed Stage Breakdown:
-
-1. **UI Component Layer (`components/AskVedaang.jsx`)**:
-   * User enters text or selects a prompt button (e.g., *"Who is Vedaang?"*).
-   * Appends user message to local state `messages`.
-   * Sends `fetch("/api/ask", { method: "POST", body: JSON.stringify({ message }) })`.
-   * Acquires `response.body.getReader()` to process byte stream.
-
-2. **API Route Layer (`app/api/ask/route.js`)**:
-   * Route configured with `export const dynamic = "force-dynamic"`.
-   * Parses JSON body `{ message }`. Validates string type and non-empty content.
-
-3. **Knowledge Aggregation Layer (`lib/ask/knowledgeAggregator.js`)**:
-   * Calls `createAdminClient()` from `lib/supabase/admin.js`.
-   * Executes `Promise.all` issuing 8 parallel Supabase queries (`projects`, `research_papers`, `research_interests`, `experience`, `skills`, `certifications`, `education`, `site_settings`).
-
-4. **Supabase Database Layer (`lib/supabase/admin.js`)**:
-   * Uses `SUPABASE_SERVICE_ROLE_KEY` to bypass Row Level Security (RLS).
-   * Queries PostgreSQL database instance (`bgsxyltobglglgdisrsd.supabase.co`).
-
-5. **Data Mapping Layer (`lib/supabase/mappers.js`)**:
-   * Transforms raw database rows (snake_case) into frontend domain objects.
-   * Assembles a monolithic `kb` (Knowledge Base) object containing all portfolio records.
-
-6. **LLM Provider / Engine Layer (`callGroqLLM`, `callGeminiLLM`, `askEngine.js`)**:
-   * **Path A**: Groq API (`llama-3.3-70b-versatile`) — system prompt receives `JSON.stringify(kb, null, 2)`.
-   * **Path B**: Gemini API (`gemini-1.5-flash`) — fallback LLM if Groq fails or key missing.
-   * **Path C**: Grounded RAG Synthesizer (`askEngine.js`) — rule-based fallback if all LLM API keys are unconfigured.
-
-7. **Streaming Response Layer (`ReadableStream` -> UI)**:
-   * Splits answer string into words via `answer.split(" ")`.
-   * Enqueues encoded bytes (`TextEncoder`) into `ReadableStream` with `15ms` artificial delay.
-   * Streams back as `text/plain; charset=utf-8`.
-   * UI `TextDecoder` reads chunks and continuously updates state.
-
 ---
 
 ### 3. Comprehensive Failure Point Inventory
 
 | Layer | Failure Point | Description & Impact | Severity |
 | :--- | :--- | :--- | :--- |
-| **Aggregator** | `Promise.all` Fail-Fast Rejection | If **any single** Supabase table query fails (e.g. schema migration error, missing table, database lock), `Promise.all` rejects entirely, collapsing knowledge to empty fallback arrays. | **High** |
+| **Aggregator** | `Promise.all` Fail-Fast Rejection | If **any single** Supabase table query fails (e.g. schema migration error, missing table), `Promise.all` rejects entirely, collapsing knowledge to empty fallback arrays. | **High** |
 | **Aggregator** | Unbounded In-Memory Loading | Fetches **every single row** across 8 tables on **every user query**. Does not scale with site content growth and consumes high memory. | **High** |
 | **LLM Gateway** | Unconfigured API Keys | Neither `GROQ_API_KEY` nor `GEMINI_API_KEY` are present in `.env`, forcing 100% of traffic to the static fallback engine. | **Critical** |
 | **LLM Gateway** | System Prompt Token Blowout | Serializing the entire database as `JSON.stringify(kb)` into the system prompt wastes tokens, causes high latency, and hits LLM context window limits. | **High** |
@@ -238,6 +203,9 @@ Audit of environment configuration in [.env](file:///d:/Vedaang/Internship/FlyRa
 | `GROQ_API_KEY` | Secret (Server Only) | **MISSING** | Required for Groq API (`llama-3.3-70b-versatile`). Currently undefined. |
 | `GEMINI_API_KEY` / `GOOGLE_GENERATIVE_AI_API_KEY` | Secret (Server Only) | **MISSING** | Required for Gemini API (`gemini-1.5-flash`). Currently undefined. |
 | `OPENAI_API_KEY` | Secret (Server Only) | **MISSING** | Needed for RAG embedding generation (`text-embedding-3-small`). |
+| `COHERE_API_KEY` | Secret (Server Only) | **MISSING** | Required for optional multi-stage Cross-Encoder Re-ranking (`cohere-rerank-v3`). |
+| `UPSTASH_REDIS_REST_URL` | Secret (Server Only) | **CONFIGURED** | Present for Upstash Redis REST query caching. |
+| `UPSTASH_REDIS_REST_TOKEN` | Secret (Server Only) | **CONFIGURED** | Present for Upstash Redis REST query caching. |
 
 ---
 
@@ -265,136 +233,293 @@ The current system implements a **three-tier fallback chain**:
    * If unmatched: Returns a static default bio response.
 4. **Safety Net (Route Level)**: If `answer` is empty string, returns hardcoded welcome message.
 
-**Verdict**: The fallback chain guarantees that an HTTP 500 error is rarely thrown to the user. However, because Tier 1 and Tier 2 are disabled by unconfigured keys, 100% of user traffic falls to Tier 3, making the assistant feel rigid, repetitive, and non-conversational.
-
 ---
 
-## Part 2: Dynamic RAG Architecture Design
+## Part 2: Dynamic RAG Architecture Design (Refined Specifications)
 
-To transform **Ask Vedaang** into an intelligent, dynamic, grounded AI assistant, we redesign the knowledge pipeline into a **Retrieval-Augmented Generation (RAG)** architecture using **Supabase + pgvector**.
-
----
-
-### 1. Architecture Principles
-
-1. **Supabase is the Single Source of Truth**: All knowledge (projects, research papers, blog posts, skills, experience, education, site settings) remains strictly stored and managed in Supabase PostgreSQL tables.
-2. **Zero Hardcoded Knowledge**: No static Markdown knowledge files, no hardcoded answer strings, and no prompt-stuffed JSON dumps.
-3. **Dynamic Vector & Hybrid Retrieval**: Knowledge is chunked, embedded, and stored in Supabase using `pgvector`. User queries retrieve only the top-K most relevant chunks using hybrid search.
-4. **Strict Grounding & Anti-Hallucination**: The LLM system prompt enforces strict context adherence: answers must be synthesized strictly from retrieved Supabase context chunks.
-
----
-
-### 2. Comprehensive System Architecture Diagram
+To transform **Ask Vedaang** into an intelligent, dynamic, grounded AI assistant, we redesign the knowledge pipeline into a state-of-the-art **Retrieval-Augmented Generation (RAG)** architecture using **Supabase + pgvector** following the end-to-end flow:
 
 ```
-                       ┌──────────────────────────────────────┐
-                       │           Supabase CMS               │
-                       │ (projects, research, blog, bio, etc.)│
-                       └──────────────────┬───────────────────┘
-                                          │
-                                          │ Database Triggers / Webhooks
-                                          ▼
-                       ┌──────────────────────────────────────┐
-                       │     Embedding Ingestion Pipeline     │
-                       │ - Chunking: Semantic & Markdown      │
-                       │ - Embedding: text-embedding-3-small  │
-                       └──────────────────┬───────────────────┘
-                                          │
-                                          │ Insert / Update Vector Chunks
-                                          ▼
-                       ┌──────────────────────────────────────┐
-                       │     Supabase vector Database         │
-                       │     (`portfolio_embeddings` table)   │
-                       │     - Index: HNSW Cosine Index       │
-                       │     - Hybrid: Vector + Full-Text     │
-                       └──────────────────▲───────────────────┘
-                                          │
-                                          │ Hybrid Vector Search Query
-                                          │ (match_portfolio_embeddings)
-[ User Query ] ──► [ API Route ] ─────────┤
-                         │                │
-                         │ Retracted Chunks (Top 5)
-                         ▼                │
-               ┌──────────────────────────┴──────────┐
-               │         Context Synthesizer         │
-               │ - System Prompt Construction        │
-               │ - Grounding Instructions            │
-               └──────────────────┬──────────────────┘
-                                  │
-                                  │ System & User Message
-                                  ▼
-               ┌─────────────────────────────────────┐
-               │           LLM Engine                │
-               │ (Groq / Gemini / OpenAI Streaming)  │
-               └──────────────────┬──────────────────┘
-                                  │
-                                  │ SSE Stream (text/event-stream)
-                                  ▼
-               ┌─────────────────────────────────────┐
-               │    UI Layer (AskVedaang.jsx)        │
-               │ - Stream Reader + Markdown Render   │
-               └─────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    Supabase CMS                         │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│                  Knowledge Builder                      │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│                  Semantic Chunker                       │
+│    (Section-Level: Problem, Architecture, Stack)        │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│                 Embedding Generator                     │
+│               (Background Worker Queue)                 │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│                      pgvector                           │
+│             (`portfolio_embeddings` table)              │
+└────────────────────────────▲────────────────────────────┘
+                             │
+────────────── Runtime Query Processing ───────────────────
+                             │
+┌────────────────────────────┴────────────────────────────┐
+│                    User Question                        │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│            Query Caching (Upstash Redis KV)             │
+│            Hit? Return Cached Stream Response           │
+└────────────────────────────┬────────────────────────────┘
+                             │ Miss
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│                 Query Contextualizer                    │
+│           (Conversation Memory Integration)             │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│                  Query Embedding                        │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│             Hybrid Search (Vector + FTS)                │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│                Metadata Filtering                       │
+│           (Filter by Tech, Section, Category)           │
+└────────────────────────────┬────────────────────────────┘
+                             │ (Top 20 Chunks)
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│                    Reranking                            │
+│           (Cross-Encoder / Cohere Rerank)               │
+└────────────────────────────┬────────────────────────────┘
+                             │ (Top 5 Chunks)
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│                 Prompt Builder                          │
+│           (Strict Categorical Grounding)                │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│                      LLM                                │
+│         (Groq / Gemini / OpenAI Gateway)                │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│              Streaming Response (SSE)                   │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│               Conversation Memory                        │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│               Analytics & Logging                       │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-### 3. Core Component Specifications
+### 1. Architectural Principles & Refinements
 
-#### A. Supabase `pgvector` Schema & Index Design
+1. **Supabase is the Single Source of Truth**: All domain entities remain stored in Supabase PostgreSQL tables.
+2. **Granular Section-Level Semantic Chunking**: Projects, research papers, and blog posts are split into distinct semantic sub-chunks (e.g. *Problem Statement*, *Architecture & Algorithms*, *Engineering Decisions*, *Challenges*). Answering *"How did you calculate joint angles?"* retrieves **only** the `Joint Angle Calculation` chunk rather than a monolithic project record.
+3. **Decoupled Asynchronous Worker Ingestion**: No expensive or fragile database triggers. Content updates in CMS trigger an API route or background queue (`reindex-queue`) processed by a background worker.
+4. **Clean Separation of Concerns**:
+   - `KnowledgeBuilder` fetches clean entity documents.
+   - `SemanticChunker` decomposes documents into section-level payloads.
+   - `EmbeddingGenerator` produces 1536-dim vectors.
+   - `Retriever` handles Hybrid Retrieval (Vector + Full-Text) and Metadata Filtering.
+   - `Reranker` scores Top 20 retrieved candidates down to Top 5.
+   - `PromptBuilder` formats structured anti-hallucination prompts.
+   - `LLMEngine` handles stream generation.
+5. **Multi-turn Conversation Memory**: Rewrites user queries in context of recent chat turns to support follow-up questions (e.g., *"How fast is it?"* after asking about Aegis Care).
+6. **Query Caching Layer**: Checks Upstash Redis / Vercel KV with normalized query hashes before calling retrieval & LLM generation.
+7. **Knowledge Versioning & Incremental Reindexing**: Every chunk maintains `updatedAt`, `version`, and content `checksum` (SHA-256). Updating one project re-embeds **only** that project's modified section chunks.
+8. **Observability & Telemetry**: Logs query, retrieved chunks, similarity scores, rerank scores, latency, chosen LLM model, and errors for continuous improvement.
 
-We enable the `vector` extension in Supabase and create a dedicated `portfolio_embeddings` table:
+---
+
+### 2. Core Component Specifications
+
+#### A. Rich Source Metadata Schema & `pgvector` Table
+
+We define the `portfolio_embeddings` schema in Supabase with complete source metadata and version tracking:
 
 ```sql
--- 1. Enable pgvector extension
+-- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- 2. Create dynamic embeddings table
+-- Create dynamic section-level portfolio embeddings table
 CREATE TABLE IF NOT EXISTS portfolio_embeddings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  content_type TEXT NOT NULL,          -- 'project', 'research_paper', 'blog_post', 'skill', 'experience', 'bio'
-  source_id UUID NOT NULL,            -- Foreign reference to original table record ID
-  title TEXT NOT NULL,                 -- Human-readable entity title
-  slug TEXT,                           -- Route slug for markdown link generation
-  chunk_index INT NOT NULL DEFAULT 0,  -- Sequential chunk index
-  content TEXT NOT NULL,               -- Semantic textual chunk
-  embedding vector(1536) NOT NULL,    -- 1536-dim vector (OpenAI text-embedding-3-small or Gemini)
-  metadata JSONB DEFAULT '{}'::jsonb, -- Flexible metadata (tech stack, year, venue, category)
+  type TEXT NOT NULL,                  -- 'project', 'research_paper', 'blog_post', 'skill', 'experience', 'bio'
+  source_id UUID NOT NULL,            -- Foreign reference to primary table row ID
+  title TEXT NOT NULL,                 -- e.g. "Posture Sense"
+  slug TEXT,                           -- Route URL e.g. "/projects/posture-sense"
+  section TEXT NOT NULL,               -- e.g. "Architecture", "Problem Statement", "Backend", "Challenges"
+  content TEXT NOT NULL,               -- Textual section payload
+  embedding vector(1536) NOT NULL,    -- 1536-dim vector (OpenAI text-embedding-3-small)
+  metadata JSONB DEFAULT '{}'::jsonb, -- Filter attributes: {"tech_stack": ["Python", "Flask", "MediaPipe"], "category": "Computer Vision"}
+  version INT NOT NULL DEFAULT 1,     -- Incremental schema version
+  checksum TEXT NOT NULL,              -- SHA-256 hash of (title + section + content + metadata)
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 3. Create HNSW Index for ultra-fast Cosine Similarity Search (<5ms query time)
+-- Create HNSW Index for ultra-fast Cosine Similarity Search
 CREATE INDEX IF NOT EXISTS idx_portfolio_embeddings_hnsw 
 ON portfolio_embeddings 
 USING hnsw (embedding vector_cosine_ops) 
 WITH (m = 16, ef_construction = 64);
 
--- 4. Create Full-Text Search Index for Hybrid Search
+-- Full-Text Search Index for Hybrid Lexical Search
 ALTER TABLE portfolio_embeddings ADD COLUMN IF NOT EXISTS fts tsvector 
-GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || content)) STORED;
+GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || section || ' ' || content)) STORED;
 
 CREATE INDEX IF NOT EXISTS idx_portfolio_embeddings_fts 
 ON portfolio_embeddings USING gin(fts);
 ```
 
+##### Standardized Chunk JSON Structure:
+```json
+{
+  "id": "e4b8a21f-829d-4e92-938a-33bfdf09a12e",
+  "type": "project",
+  "title": "Posture Sense",
+  "url": "/projects/posture-sense",
+  "section": "Backend & Angle Calculation",
+  "content": "Calculates real-time joint angles using MediaPipe pose detectionLandmarks. Vector dot product computed across shoulder, hip, and neck coordinates to evaluate spinal posture alignment with sub-15ms latency.",
+  "metadata": {
+    "tech_stack": ["Python", "Flask", "MediaPipe", "OpenCV"],
+    "category": "Computer Vision",
+    "year": 2024
+  },
+  "version": 1,
+  "checksum": "a8f5c3d19e...7b2a",
+  "updatedAt": "2026-08-03T18:30:00Z"
+}
+```
+
 ---
 
-#### B. Hybrid Search RPC Function (Vector + Full-Text Search)
+#### B. Asynchronous Ingestion & Incremental Reindexing Worker
 
-To guarantee high retrieval precision (combining semantic intent + exact technical terms like *"Aegis Care"*, *"gRPC"*, *"PyTorch"*), we implement an SQL RPC function in Supabase using **Reciprocal Rank Fusion (RRF)**:
+Instead of database triggers, content updates in Supabase trigger an asynchronous background worker (`/api/admin/reindex`):
+
+```
+┌────────────────────────────────┐
+│ CMS Action (Save Project/Post) │
+└───────────────┬────────────────┘
+                │
+                ▼
+┌────────────────────────────────┐
+│ POST /api/admin/reindex-job    │
+└───────────────┬────────────────┘
+                │ Enqueue Job
+                ▼
+┌────────────────────────────────┐
+│ Background Embedding Worker    │
+│ 1. Extract raw content sections│
+│ 2. Compute SHA-256 checksums   │
+│ 3. Check existing checksums in │
+│    `portfolio_embeddings`      │
+│ 4. Re-embed ONLY changed chunks│
+│ 5. Delete removed sections     │
+└────────────────────────────────┘
+```
+
+##### Incremental Versioning Check Logic:
+```javascript
+// Pseudo-code for Incremental Section Reindexing
+async function syncProjectChunks(project) {
+  const sections = [
+    { name: "Overview", text: project.description },
+    { name: "Problem Statement", text: project.problemStatement },
+    { name: "Architecture", text: project.architectureNotes },
+    { name: "Engineering Decisions", text: project.engineeringDecisions },
+    { name: "Challenges", text: project.challenges },
+  ].filter((s) => s.text && s.text.trim());
+
+  for (const sec of sections) {
+    const checksum = crypto
+      .createHash("sha256")
+      .update(`${project.title}:${sec.name}:${sec.text}`)
+      .digest("hex");
+
+    const { data: existing } = await supabase
+      .from("portfolio_embeddings")
+      .select("id, checksum")
+      .eq("source_id", project.id)
+      .eq("section", sec.name)
+      .maybeSingle();
+
+    if (existing && existing.checksum === checksum) {
+      // Checksum matches - skip expensive re-embedding call
+      continue;
+    }
+
+    const vector = await generateEmbedding(`${project.title} - ${sec.name}: ${sec.text}`);
+    await supabase.from("portfolio_embeddings").upsert({
+      source_id: project.id,
+      type: "project",
+      title: project.title,
+      slug: `/projects/${project.slug}`,
+      section: sec.name,
+      content: sec.text,
+      embedding: vector,
+      metadata: { tech_stack: project.tech_stack, category: project.category },
+      checksum,
+      updated_at: new Date().toISOString(),
+    });
+  }
+}
+```
+
+---
+
+#### C. Hybrid Search, Metadata Filtering & Multi-Stage Re-ranking
+
+Runtime retrieval follows a 3-step pipeline:
+
+1. **Step 1: Hybrid Search (Vector Cosine + Full-Text Keyword)**:
+   Retrieves Top 20 candidate chunks matching either semantic embedding distance OR PostgreSQL keyword match.
+2. **Step 2: Metadata Filtering**:
+   Applies JSONB metadata constraints (e.g. `metadata->'tech_stack' ? 'Flask'`).
+3. **Step 3: Cross-Encoder Re-ranking**:
+   Passes the user query and 20 retrieved candidates to a Cross-Encoder model (Cohere Rerank v3 or `bge-reranker-large`). Re-ranks candidates by relevance score and selects the **Top 5** highest quality chunks.
 
 ```sql
-CREATE OR REPLACE FUNCTION match_portfolio_embeddings (
+-- Hybrid Retrieval RPC Function in Supabase
+CREATE OR REPLACE FUNCTION match_portfolio_chunks (
   query_embedding vector(1536),
   query_text TEXT,
-  match_threshold FLOAT DEFAULT 0.3,
-  match_count INT DEFAULT 5
+  filter_metadata JSONB DEFAULT '{}'::jsonb,
+  match_count INT DEFAULT 20
 )
 RETURNS TABLE (
   id UUID,
-  content_type TEXT,
+  type TEXT,
   source_id UUID,
   title TEXT,
   slug TEXT,
+  section TEXT,
   content TEXT,
   metadata JSONB,
   similarity FLOAT
@@ -405,57 +530,26 @@ BEGIN
   RETURN QUERY
   WITH vector_matches AS (
     SELECT 
-      pe.id,
-      pe.content_type,
-      pe.source_id,
-      pe.title,
-      pe.slug,
-      pe.content,
-      pe.metadata,
+      pe.id, pe.type, pe.source_id, pe.title, pe.slug, pe.section, pe.content, pe.metadata,
       1 - (pe.embedding <=> query_embedding) AS similarity
     FROM portfolio_embeddings pe
-    WHERE 1 - (pe.embedding <=> query_embedding) > match_threshold
+    WHERE (filter_metadata = '{}'::jsonb OR pe.metadata @> filter_metadata)
     ORDER BY pe.embedding <=> query_embedding ASC
-    LIMIT match_count * 2
+    LIMIT match_count
   ),
   fts_matches AS (
     SELECT 
-      pe.id,
-      pe.content_type,
-      pe.source_id,
-      pe.title,
-      pe.slug,
-      pe.content,
-      pe.metadata,
+      pe.id, pe.type, pe.source_id, pe.title, pe.slug, pe.section, pe.content, pe.metadata,
       ts_rank(pe.fts, websearch_to_tsquery('english', query_text)) AS similarity
     FROM portfolio_embeddings pe
     WHERE pe.fts @@ websearch_to_tsquery('english', query_text)
+      AND (filter_metadata = '{}'::jsonb OR pe.metadata @> filter_metadata)
     ORDER BY similarity DESC
-    LIMIT match_count * 2
+    LIMIT match_count
   )
-  -- Combine results with vector preference fallback
-  SELECT 
-    v.id,
-    v.content_type,
-    v.source_id,
-    v.title,
-    v.slug,
-    v.content,
-    v.metadata,
-    v.similarity::FLOAT
-  FROM vector_matches v
+  SELECT * FROM vector_matches
   UNION ALL
-  SELECT 
-    f.id,
-    f.content_type,
-    f.source_id,
-    f.title,
-    f.slug,
-    f.content,
-    f.metadata,
-    f.similarity::FLOAT
-  FROM fts_matches f
-  WHERE f.id NOT IN (SELECT id FROM vector_matches)
+  SELECT * FROM fts_matches WHERE id NOT IN (SELECT vector_matches.id FROM vector_matches)
   LIMIT match_count;
 END;
 $$;
@@ -463,118 +557,120 @@ $$;
 
 ---
 
-#### C. Automatic Ingestion & Embedding Sync Pipeline
+#### D. Dynamic Prompt Builder with Categorical Grounding
 
-Whenever content is inserted, updated, or deleted in Supabase (via Admin Panel or CMS migrations), the ingestion pipeline updates `portfolio_embeddings` automatically.
-
-```
-┌─────────────────────────────────┐
-│ Admin CMS Action                │
-│ (Update Project / Blog Post)    │
-└────────────────┬────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────┐
-│ Supabase Database Webhook       │
-│ POST /api/admin/reindex-rag     │
-└────────────────┬────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────┐
-│ Reindexing Service              │
-│ 1. Extract content & metadata   │
-│ 2. Semantic Chunking (500 w)    │
-│ 3. Generate Embedding Vectors   │
-│ 4. Upsert `portfolio_embeddings`│
-└─────────────────────────────────┘
-```
-
-##### Chunking Rules by Entity Type:
-1. **Projects**: Title, Problem Statement, Engineering Decisions, Tech Stack, Links, and Case Study Body -> 1–3 chunks per project.
-2. **Research Papers**: Title, Venue, Year, Abstract, DOI Link, and Paper Content -> 1–2 chunks per paper.
-3. **Blog Posts**: Title, Excerpt, Topic, and Content sections -> Chunked dynamically every ~500 words with 50-word overlap.
-4. **Skills & Experience**: Grouped by domain -> 1 consolidated chunk per role/domain.
-5. **Site Bio & Settings**: Hero Subtitle, About Bio, Contact info -> 1 chunk.
-
----
-
-#### D. Dynamic Context Assembly & System Prompt Design
-
-Instead of passing the entire database to the LLM, the API route retrieves only the **Top 5 most relevant context chunks** (costing ~500-1000 tokens instead of 10,000+ tokens).
-
-##### System Prompt Template:
-```
-You are Ask Vedaang, an intelligent, technical, and precise AI assistant representing Vedaang Sharma's engineering portfolio.
-
-STRICT GROUNDING INSTRUCTIONS:
-1. Answer the user's question using ONLY the retrieved context snippets provided below.
-2. If the retrieved context does not contain sufficient information to answer the question, state clearly that you do not have that specific detail in Vedaang's portfolio records, and suggest relevant sections to explore.
-3. When referencing specific projects, include markdown links in the format: [Project Title](/projects/slug).
-4. When referencing research papers, cite the paper title and venue.
-5. Keep your tone encouraging, professional, and technically rigorous.
-
-RETRIEVED PORTFOLIO CONTEXT CHUNKS:
----
-[Chunk 1 | Type: project | Title: Aegis Care | Slug: aegis-care]
-Content: Aegis Care is an AI-powered healthcare assistant built with Python, FastAPI, and PyTorch...
-
-[Chunk 2 | Type: skill | Title: Backend Stack]
-Content: Vedaang specializes in Node.js, Go, Python, PostgreSQL, Redis, Docker, and Supabase...
----
-
-USER QUESTION:
-{user_message}
-```
-
----
-
-#### E. Resilient Server-Sent Events (SSE) Streaming Protocol
-
-We upgrade the API route to return a standardized SSE stream (`text/event-stream`) compatible with modern browser streams and Vercel AI SDK:
+`PromptBuilder` organizes retrieved Top-5 chunks into clear categories and enforces anti-hallucination guardrails:
 
 ```javascript
-// Optimized SSE Streaming Response in Next.js Route Handler
-export async function POST(request) {
-  // 1. Vector Search Retrieval
-  const chunks = await retrieveRelevantChunks(userMessage);
+export function buildRAGPrompt(userQuery, chunks, conversationHistory = []) {
+  const groupedContext = chunks.reduce((acc, chunk) => {
+    const key = chunk.type.toUpperCase();
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(
+      `### ${chunk.title} — ${chunk.section} ([Link](${chunk.slug}))\n${chunk.content}`
+    );
+    return acc;
+  }, {});
 
-  // 2. LLM Stream Initialization (Groq / Gemini / OpenAI)
-  const llmStream = await streamLLMResponse(userMessage, chunks);
+  const formattedContext = Object.entries(groupedContext)
+    .map(([category, items]) => `== ${category} KNOWLEDGE ==\n${items.join("\n\n")}`)
+    .join("\n\n");
 
-  // 3. Transform to SSE Stream Response
-  return new Response(llmStream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
-      "X-Content-Type-Options": "nosniff",
-    },
-  });
+  return `You are Ask Vedaang, an AI assistant representing Vedaang Sharma's engineering portfolio.
+
+STRICT OPERATIONAL RULES:
+1. Answer the user's question using ONLY the retrieved portfolio context below.
+2. If the context does not explicitly contain the answer, state clearly: "I don't have that specific detail in Vedaang's portfolio records." Do not fabricate answers.
+3. Always include Markdown links formatted as [Title](/projects/slug) when referencing projects or case studies.
+4. Maintain a technical, precise, and encouraging tone.
+
+RETRIEVED PORTFOLIO CONTEXT:
+${formattedContext || "No relevant context chunks found."}
+
+${conversationHistory.length > 0 ? `CONVERSATION HISTORY:\n${formatHistory(conversationHistory)}\n` : ""}
+USER QUESTION: ${userQuery}`;
 }
 ```
 
 ---
 
-### 4. Architectural Decisions & Trade-Off Analysis
+#### E. Conversation Memory & Multi-turn Query Rewriting
+
+To resolve follow-up questions like *"What backend did you use for it?"* after asking *"Tell me about Aegis Care"*, the assistant uses a lightweight **Query Contextualizer**:
+
+```
+[ User Query: "What backend did you use for it?" ]
+                      +
+[ Recent History: "User: Tell me about Aegis Care..." ]
+                      │
+                      ▼
+┌──────────────────────────────────────────────────┐
+│ Query Contextualizer (Fast LLM / Regex Rules)    │
+│ Standalone Query: "What backend framework and    │
+│ tech stack was used for the Aegis Care project?" │
+└─────────────────────┬────────────────────────────┘
+                      │
+                      ▼
+┌──────────────────────────────────────────────────┐
+│ Vector & Full-Text Search on Standalone Query    │
+└──────────────────────────────────────────────────┘
+```
+
+---
+
+#### F. High-Performance Query Caching & Native SSE Streaming
+
+1. **Redis Query Cache**:
+   Query strings are lowercased, trimmed, and hashed with SHA-256. `Upstash Redis REST` checks key `rag:cache:<hash>`. On cache hit, streams back stored text directly without LLM API calls.
+2. **Native SSE Byte Streaming**:
+   Replaces `answer.split(" ")` with WHATWG `ReadableStream` yielding `Uint8Array` byte chunks formatted as Server-Sent Events (`text/event-stream`). UI decodes chunks using standard streaming response handling or Vercel AI SDK wrappers.
+
+---
+
+#### G. Observability, Telemetry & Analytics
+
+Every request logs execution metrics to `rag_analytics` table in Supabase for continuous monitoring:
+
+```sql
+CREATE TABLE IF NOT EXISTS rag_analytics (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  query TEXT NOT NULL,
+  standalone_query TEXT,
+  retrieved_chunk_ids UUID[],
+  top_similarity_score FLOAT,
+  rerank_scores FLOAT[],
+  cache_hit BOOLEAN DEFAULT FALSE,
+  llm_provider TEXT,                  -- 'groq', 'gemini', 'openai', 'fallback'
+  time_to_first_token_ms INT,
+  total_latency_ms INT,
+  error TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+---
+
+### 3. Comprehensive Architectural Decisions & Trade-Off Matrix
 
 | Architectural Decision | Chosen Strategy | Alternative Considered | Justification & Technical Rationale |
 | :--- | :--- | :--- | :--- |
-| **Vector Storage** | **Supabase `pgvector`** | External DB (Pinecone, Qdrant) | Keeps Supabase as the **single source of truth**. Eliminates multi-database synchronization overhead, extra SaaS subscription costs, and vendor lock-in. |
-| **Retrieval Strategy** | **Hybrid Search (Vector + Full-Text RRF)** | Pure Vector Search | Pure vector search can miss exact technical terms, proper nouns, or exact product names (e.g. *"Aegis Care"* vs generic *"healthcare app"*). Hybrid search combines semantic understanding with exact lexical matching. |
-| **Embedding Model** | **`text-embedding-3-small` (1536-dim)** | HuggingFace local / `all-MiniLM-L6-v2` | `text-embedding-3-small` yields state-of-the-art retrieval performance at $0.00002 / 1k tokens (effectively free for portfolio scale), with native 1536-dimension support in pgvector HNSW indices. |
-| **LLM Gateway Order** | **Groq (`llama-3.3-70b`) -> Gemini 1.5 Flash -> Grounded Fallback** | Single LLM Provider | Groq offers sub-200ms time-to-first-token ultra-low latency streaming. Falling back to Gemini and then Grounded Synthesizer guarantees 99.99% uptime even during upstream provider outages. |
-| **Streaming Protocol** | **Server-Sent Events (`text/event-stream`)** | `text/plain` chunking | SSE provides standard protocol framing (`data: ...\n\n`), preventing chunk corruption across network proxies and allowing clean UI state reconnection. |
+| **Chunking Strategy** | **Section-Level Semantic Chunking** | Document-Level / Paragraph Split | Section-level chunking isolates technical aspects (e.g. *Angle Calculation*, *Caching Layer*), preventing irrelevant project text from diluting context embeddings. |
+| **Ingestion Pipeline** | **Decoupled API Queue Worker** | PostgreSQL Database Triggers | Avoids database lock contention, reduces DB execution costs, simplifies debugging, and decouples ingestion logic from vendor DB extensions. |
+| **Vector Storage** | **Supabase `pgvector`** | Pinecone, Qdrant | Keeps Supabase as the **single source of truth**. Eliminates multi-database sync overhead, SaaS costs, and data fragmentation. |
+| **Search Strategy** | **Hybrid Search + Cross-Encoder Rerank** | Vector-Only Search | Combines semantic vector similarity with exact lexical matches (FTS) and Cross-Encoder re-ranking, ensuring high precision for technical queries. |
+| **Query Caching** | **Upstash Redis Hash Caching** | In-Memory LRU Cache | Persists query cache across serverless function restarts and edge environments. |
+| **Streaming Protocol** | **Server-Sent Events (`text/event-stream`)** | `answer.split(" ")` text stream | Prevents Markdown parsing errors, UTF-8 chunk truncation, and proxy buffer delays. |
 
 ---
 
 ## Part 3: Implementation Roadmap & Next Steps
 
-1. **Phase 1: Database Migration**: Execute SQL migration creating `portfolio_embeddings` table, HNSW vector index, full-text index, and `match_portfolio_embeddings` RPC function.
-2. **Phase 2: Ingestion & Seed Script**: Develop `scripts/seed-embeddings.mjs` to parse existing Supabase portfolio tables and seed vector embeddings.
-3. **Phase 3: RAG API Route Refactor**: Rewrite `app/api/ask/route.js` to execute vector retrieval + context assembly + SSE streaming.
-4. **Phase 4: UI Stream Component Refactor**: Update `components/AskVedaang.jsx` to consume SSE streams with robust error boundary recovery.
-5. **Phase 5: Verification & End-to-End Testing**: Execute automated query benchmarks testing retrieval accuracy, fallback resilience, and response speed.
+1. **Phase 1: Supabase `pgvector` Schema Migration**: Run SQL migration establishing `portfolio_embeddings`, HNSW index, FTS index, `match_portfolio_chunks` RPC, and `rag_analytics` table.
+2. **Phase 2: Semantic Chunker & Ingestion Worker**: Develop `lib/rag/semanticChunker.js` and `scripts/seed-embeddings.mjs` to execute section-level chunking and initial vector generation.
+3. **Phase 3: Hybrid Retriever & Reranker Gateway**: Implement `lib/rag/retriever.js` featuring hybrid search, metadata filtering, and optional Cohere/Cross-Encoder re-ranking.
+4. **Phase 4: API Route & Memory Refactor**: Rewrite `app/api/ask/route.js` to integrate Redis caching, query contextualization, prompt building, and SSE streaming.
+5. **Phase 5: UI Stream & Analytics Update**: Refactor `components/AskVedaang.jsx` to process native SSE streams with robust error boundary handling and analytics logging.
 
 ---
 
-*End of Audit and Architectural Design Document.*
+*End of Architectural Audit & Dynamic RAG Design Document.*

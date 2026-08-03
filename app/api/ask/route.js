@@ -1,27 +1,35 @@
 import { NextResponse } from "next/server";
-import { getAggregatedKnowledge } from "@/lib/ask/knowledgeAggregator";
+import { semanticSearch } from "@/lib/rag/search";
 import { answerQuestion } from "@/lib/ask/askEngine";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Builds system prompt for external LLM API (Groq/Gemini/OpenAI) using dynamic RAG knowledge
+ * Builds dynamic grounded system prompt for LLM API (Groq/Gemini/OpenAI).
+ * CRITICAL: Never sends the entire database. Only incorporates top 5 retrieved context documents.
  */
-function buildSystemPrompt(kb) {
+function buildGroundedSystemPrompt(retrievedContext) {
   return `You are Ask Vedaang, an AI assistant representing Vedaang Sharma's engineering portfolio.
-Answer questions accurately, concisely, and professionally using ONLY the provided portfolio context below.
-Always maintain an encouraging, technical, and precise tone.
-When referencing specific projects, include markdown links in the format [Project Title](/projects/slug).
-When referencing research, cite the paper title and venue.
 
-PORTFOLIO KNOWLEDGE BASE CONTEXT:
-${JSON.stringify(kb, null, 2)}`;
+STRICT GROUNDING & CITATION RULES:
+1. Answer the user's question accurately, concisely, and professionally using ONLY the RETRIEVED PORTFOLIO CONTEXT provided below.
+2. Ground every answer. Do NOT hallucinate, invent, or assume any facts outside the provided retrieved context.
+3. If the user's question cannot be answered using the provided context, state clearly and honestly: "I don't have that specific information in Vedaang's portfolio records. You can explore his work on the [Projects Page](/projects), read published papers on the [Research Page](/research), or send a message on the [Contact Page](/contact)."
+4. CITATION REQUIREMENT:
+   - For projects, include markdown links: e.g. [Project Title](/projects/slug) or [Project Title](url).
+   - For research papers, cite titles and venues: e.g. [Paper Title](/research).
+   - For resume or CV, cite [Download Resume](/api/resume).
+   - For contact information, cite email and [Contact Page](/contact).
+5. Output clean GitHub Flavored Markdown.
+
+RETRIEVED PORTFOLIO CONTEXT (Top 5 Relevant Documents):
+${retrievedContext || "No relevant documents found."}`;
 }
 
 /**
- * Attempts to query Groq API if GROQ_API_KEY is configured
+ * Attempts to query Groq API (llama-3.3-70b-versatile)
  */
-async function callGroqLLM(userMessage, kb) {
+async function callGroqLLM(userMessage, systemPrompt) {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) return null;
 
@@ -29,16 +37,16 @@ async function callGroqLLM(userMessage, kb) {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${apiKey}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
         messages: [
-          { role: "system", content: buildSystemPrompt(kb) },
+          { role: "system", content: systemPrompt },
           { role: "user", content: userMessage },
         ],
-        temperature: 0.3,
+        temperature: 0.2,
         max_tokens: 1024,
       }),
     });
@@ -58,9 +66,9 @@ async function callGroqLLM(userMessage, kb) {
 }
 
 /**
- * Attempts to query Gemini API if GEMINI_API_KEY is configured
+ * Attempts to query Gemini API (gemini-1.5-flash)
  */
-async function callGeminiLLM(userMessage, kb) {
+async function callGeminiLLM(userMessage, systemPrompt) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) return null;
 
@@ -71,15 +79,13 @@ async function callGeminiLLM(userMessage, kb) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         system_instruction: {
-          parts: [{ text: buildSystemPrompt(kb) }]
+          parts: [{ text: systemPrompt }],
         },
-        contents: [
-          { parts: [{ text: userMessage }] }
-        ],
+        contents: [{ parts: [{ text: userMessage }] }],
         generationConfig: {
-          temperature: 0.3,
+          temperature: 0.2,
           maxOutputTokens: 1024,
-        }
+        },
       }),
     });
 
@@ -97,45 +103,62 @@ async function callGeminiLLM(userMessage, kb) {
   }
 }
 
+/**
+ * Main RAG Ask API POST handler
+ */
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { message } = body;
+    const message = (body.message || body.question || body.prompt || "").trim();
 
-    if (!message || typeof message !== "string" || !message.trim()) {
+    if (!message) {
       return NextResponse.json(
         { message: "Query message is required." },
         { status: 400 }
       );
     }
 
-    const kb = await getAggregatedKnowledge();
+    // 1. Question -> Embedding -> Semantic search -> Top 5 documents
+    const searchResult = await semanticSearch(message, { limit: 5 });
+    const retrievedContext = searchResult.context;
+    const documents = searchResult.documents || [];
 
-    // 1. Check for external LLM API integration (Groq or Gemini)
-    let answer = await callGroqLLM(message, kb);
+    // 2. Prompt builder with ONLY retrieved context (Never send entire database)
+    const systemPrompt = buildGroundedSystemPrompt(retrievedContext);
+
+    // 3. Query LLM (Groq -> Gemini)
+    let answer = await callGroqLLM(message, systemPrompt);
     if (!answer) {
-      answer = await callGeminiLLM(message, kb);
+      answer = await callGeminiLLM(message, systemPrompt);
     }
 
-    // 2. Fallback to Grounded RAG Knowledge Synthesizer if no LLM key or request failed
+    // 4. Grounded fallback synthesizer if external LLM keys are absent/failed
     if (!answer || typeof answer !== "string" || !answer.trim()) {
-      answer = answerQuestion(message, kb);
+      answer = answerQuestion(message, { documents, context: retrievedContext });
     }
 
-    // Double guard: Ensure answer is never blank
-    if (!answer || !answer.trim()) {
-      answer = "Hello! I am **Ask Vedaang**, an AI guide to Vedaang Sharma's engineering portfolio. Ask me about his projects, technical stack, research, or experience!";
+    // 5. Streaming response guarantee: Never produce blank responses
+    let finalAnswer = (answer || "").trim();
+    if (!finalAnswer) {
+      finalAnswer = `I couldn't find specific information matching your question in Vedaang's portfolio records.
+
+Explore key sections:
+- **Projects**: Learn about [Aegis Care](/projects/aegis-care) or explore [All Projects](/projects)
+- **Research**: Read published papers on the [Research Page](/research)
+- **Skills**: View backend & AI capabilities on the [Skills Page](/skills)
+- **Resume**: Download [Vedaang's Resume PDF](/api/resume) or connect via the [Contact Page](/contact)`;
     }
 
-    // Support streaming responses via ReadableStream for real-time typing effect
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
-        const chunks = answer.split(" ");
-        for (let i = 0; i < chunks.length; i++) {
-          const word = (i === 0 ? "" : " ") + chunks[i];
-          controller.enqueue(encoder.encode(word));
-          await new Promise((r) => setTimeout(r, 15));
+        // Stream text smoothly preserving whitespace and markdown chunks
+        const chunks = finalAnswer.split(/(\s+)/);
+        for (const chunk of chunks) {
+          if (chunk) {
+            controller.enqueue(encoder.encode(chunk));
+            await new Promise((r) => setTimeout(r, 8));
+          }
         }
         controller.close();
       },
@@ -144,7 +167,8 @@ export async function POST(request) {
     return new NextResponse(stream, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Content-Type-Options": "nosniff",
       },
     });
   } catch (error) {

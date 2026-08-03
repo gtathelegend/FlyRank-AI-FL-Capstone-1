@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { requireAdmin }      from "@/lib/auth/requireAdmin";
 import { apiError }          from "@/lib/apiError";
 import { mapSkill }          from "@/lib/supabase/mappers";
+import { triggerCmsAutoSync } from "@/lib/rag/indexer";
 import { NextResponse }      from "next/server";
 
 const LEVEL_ORDER = { expert: 0, advanced: 1, intermediate: 2, beginner: 3 };
@@ -40,8 +41,12 @@ export async function POST(request) {
       .select().single();
 
     if (error) throw error;
+
+    triggerCmsAutoSync();
+
     return NextResponse.json({ data: mapSkill(data) }, { status: 201 });
   } catch (err) {
     return apiError(err, "POST /api/skills");
   }
 }
+

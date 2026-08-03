@@ -2,6 +2,7 @@ import { createAdminClient }  from "@/lib/supabase/admin";
 import { requireAdmin }       from "@/lib/auth/requireAdmin";
 import { apiError }           from "@/lib/apiError";
 import { mapResearchPaper }   from "@/lib/supabase/mappers";
+import { triggerCmsAutoSync } from "@/lib/rag/indexer";
 import { NextResponse }       from "next/server";
 
 export async function GET() {
@@ -39,8 +40,12 @@ export async function POST(request) {
 
     const { data, error } = await admin.from("research_papers").insert(record).select().single();
     if (error) throw error;
+
+    triggerCmsAutoSync();
+
     return NextResponse.json({ data: mapResearchPaper(data) }, { status: 201 });
   } catch (err) {
     return apiError(err, "POST /api/research/papers");
   }
 }
+

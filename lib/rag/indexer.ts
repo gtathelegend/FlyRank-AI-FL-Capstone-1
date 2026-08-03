@@ -222,3 +222,25 @@ export async function syncPortfolioVectorStore(forceReindex = false): Promise<In
     };
   }
 }
+
+/**
+ * Triggers background vector store synchronization whenever CMS data is mutated.
+ * Asynchronous background execution guarantees low API latency while keeping search immediately updated.
+ */
+export function triggerCmsAutoSync(): void {
+  Promise.resolve().then(async () => {
+    try {
+      console.log("[cms-sync] Auto-sync triggered by CMS table mutation...");
+      const summary = await syncPortfolioVectorStore(true);
+      console.log("[cms-sync] Auto-sync completed successfully:", {
+        reindexed: summary.indexedCount,
+        skipped: summary.skippedCount,
+        deleted: summary.deletedCount,
+        durationMs: summary.durationMs,
+      });
+    } catch (err) {
+      console.error("[cms-sync] Error during automatic vector store sync:", err);
+    }
+  });
+}
+

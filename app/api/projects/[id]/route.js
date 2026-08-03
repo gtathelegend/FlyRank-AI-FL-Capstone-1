@@ -2,6 +2,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { requireAdmin }      from "@/lib/auth/requireAdmin";
 import { apiError }          from "@/lib/apiError";
 import { mapProject }        from "@/lib/supabase/mappers";
+import { triggerCmsAutoSync } from "@/lib/rag/indexer";
 import { NextResponse }      from "next/server";
 
 export async function PUT(request, { params }) {
@@ -47,6 +48,9 @@ export async function PUT(request, { params }) {
       .single();
 
     if (error) throw error;
+
+    triggerCmsAutoSync();
+
     return NextResponse.json({ data: mapProject(data) });
   } catch (err) {
     return apiError(err, "PUT /api/projects/:id");
@@ -61,8 +65,12 @@ export async function DELETE(request, { params }) {
     const admin = createAdminClient();
     const { error } = await admin.from("projects").delete().eq("id", id);
     if (error) throw error;
+
+    triggerCmsAutoSync();
+
     return NextResponse.json({ message: "Deleted" });
   } catch (err) {
     return apiError(err, "DELETE /api/projects/:id");
   }
 }
+

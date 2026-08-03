@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { requireAdmin }      from "@/lib/auth/requireAdmin";
 import { apiError }          from "@/lib/apiError";
 import { mapProject }        from "@/lib/supabase/mappers";
+import { triggerCmsAutoSync } from "@/lib/rag/indexer";
 import { NextResponse }      from "next/server";
 
 export async function GET() {
@@ -55,8 +56,13 @@ export async function POST(request) {
 
     const { data, error } = await admin.from("projects").insert(record).select().single();
     if (error) throw error;
+
+    // Trigger automatic background CMS knowledge & embedding synchronization
+    triggerCmsAutoSync();
+
     return NextResponse.json({ data: mapProject(data) }, { status: 201 });
   } catch (err) {
     return apiError(err, "POST /api/projects");
   }
 }
+

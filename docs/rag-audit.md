@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-This document presents a comprehensive architectural audit of the current **Ask Vedaang** AI assistant system within Vedaang Sharma's engineering portfolio codebase. It diagnoses the root causes behind blank and failing assistant responses, maps out the end-to-end request lifecycle, documents critical failure modes across all system layers, verifies all database queries and environment variables, and delivers an upgraded, production-grade **Retrieval-Augmented Generation (RAG)** architecture design powered dynamically by Supabase (`pgvector`), granular section-level semantic chunking, decoupled asynchronous worker ingestion, hybrid search with multi-stage re-ranking, conversation memory, query caching, and analytics logging.
+This document presents a comprehensive architectural audit of the current **Ask Vedaang** AI assistant system within Vedaang Sharma's engineering portfolio codebase. It diagnoses the root causes behind blank and failing assistant responses, maps out the end-to-end request lifecycle, documents critical failure modes across all system layers, verifies all database queries and environment variables, and delivers an upgraded, production-grade **Retrieval-Augmented Generation (RAG)** architecture design powered dynamically by Supabase (`pgvector`), granular section-level semantic chunking, decoupled asynchronous worker ingestion, hybrid search with multi-stage re-ranking, conversation memory, a portable distributed cache layer, and analytics logging.
 
 ---
 
@@ -204,8 +204,8 @@ Audit of environment configuration in [.env](file:///d:/Vedaang/Internship/FlyRa
 | `GEMINI_API_KEY` / `GOOGLE_GENERATIVE_AI_API_KEY` | Secret (Server Only) | **MISSING** | Required for Gemini API (`gemini-1.5-flash`). Currently undefined. |
 | `OPENAI_API_KEY` | Secret (Server Only) | **MISSING** | Needed for RAG embedding generation (`text-embedding-3-small`). |
 | `COHERE_API_KEY` | Secret (Server Only) | **MISSING** | Required for optional multi-stage Cross-Encoder Re-ranking (`cohere-rerank-v3`). |
-| `UPSTASH_REDIS_REST_URL` | Secret (Server Only) | **CONFIGURED** | Present for Upstash Redis REST query caching. |
-| `UPSTASH_REDIS_REST_TOKEN` | Secret (Server Only) | **CONFIGURED** | Present for Upstash Redis REST query caching. |
+| `UPSTASH_REDIS_REST_URL` | Secret (Server Only) | **CONFIGURED** | Optional Redis credentials for Distributed Cache Layer. |
+| `UPSTASH_REDIS_REST_TOKEN` | Secret (Server Only) | **CONFIGURED** | Optional Redis credentials for Distributed Cache Layer. |
 
 ---
 
@@ -275,7 +275,8 @@ To transform **Ask Vedaang** into an intelligent, dynamic, grounded AI assistant
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────┐
-│            Query Caching (Upstash Redis KV)             │
+│           Distributed Cache Layer (Portable)            │
+│   (Adapters: Upstash / Vercel KV / Redis / In-Memory)   │
 │            Hit? Return Cached Stream Response           │
 └────────────────────────────┬────────────────────────────┘
                              │ Miss
@@ -332,7 +333,7 @@ To transform **Ask Vedaang** into an intelligent, dynamic, grounded AI assistant
                              ▼
 ┌─────────────────────────────────────────────────────────┐
 │               Analytics & Logging                       │
-└─────────────────────────────────────────────────────────┘
+└────────────────────────────┬────────────────────────────┘
 ```
 
 ---
@@ -351,7 +352,7 @@ To transform **Ask Vedaang** into an intelligent, dynamic, grounded AI assistant
    - `PromptBuilder` formats structured anti-hallucination prompts.
    - `LLMEngine` handles stream generation.
 5. **Multi-turn Conversation Memory**: Rewrites user queries in context of recent chat turns to support follow-up questions (e.g., *"How fast is it?"* after asking about Aegis Care).
-6. **Query Caching Layer**: Checks Upstash Redis / Vercel KV with normalized query hashes before calling retrieval & LLM generation.
+6. **Portable Distributed Cache Layer**: Defines a key-value caching interface at the architectural level (`CacheAdapter.get`, `CacheAdapter.set`) decoupled from any single vendor. Can be backed interchangeably by Upstash Redis, Vercel KV, self-hosted Redis, or local LRU in-memory cache.
 7. **Knowledge Versioning & Incremental Reindexing**: Every chunk maintains `updatedAt`, `version`, and content `checksum` (SHA-256). Updating one project re-embeds **only** that project's modified section chunks.
 8. **Observability & Telemetry**: Logs query, retrieved chunks, similarity scores, rerank scores, latency, chosen LLM model, and errors for continuous improvement.
 
@@ -397,26 +398,6 @@ CREATE INDEX IF NOT EXISTS idx_portfolio_embeddings_fts
 ON portfolio_embeddings USING gin(fts);
 ```
 
-##### Standardized Chunk JSON Structure:
-```json
-{
-  "id": "e4b8a21f-829d-4e92-938a-33bfdf09a12e",
-  "type": "project",
-  "title": "Posture Sense",
-  "url": "/projects/posture-sense",
-  "section": "Backend & Angle Calculation",
-  "content": "Calculates real-time joint angles using MediaPipe pose detectionLandmarks. Vector dot product computed across shoulder, hip, and neck coordinates to evaluate spinal posture alignment with sub-15ms latency.",
-  "metadata": {
-    "tech_stack": ["Python", "Flask", "MediaPipe", "OpenCV"],
-    "category": "Computer Vision",
-    "year": 2024
-  },
-  "version": 1,
-  "checksum": "a8f5c3d19e...7b2a",
-  "updatedAt": "2026-08-03T18:30:00Z"
-}
-```
-
 ---
 
 #### B. Asynchronous Ingestion & Incremental Reindexing Worker
@@ -445,53 +426,6 @@ Instead of database triggers, content updates in Supabase trigger an asynchronou
 └────────────────────────────────┘
 ```
 
-##### Incremental Versioning Check Logic:
-```javascript
-// Pseudo-code for Incremental Section Reindexing
-async function syncProjectChunks(project) {
-  const sections = [
-    { name: "Overview", text: project.description },
-    { name: "Problem Statement", text: project.problemStatement },
-    { name: "Architecture", text: project.architectureNotes },
-    { name: "Engineering Decisions", text: project.engineeringDecisions },
-    { name: "Challenges", text: project.challenges },
-  ].filter((s) => s.text && s.text.trim());
-
-  for (const sec of sections) {
-    const checksum = crypto
-      .createHash("sha256")
-      .update(`${project.title}:${sec.name}:${sec.text}`)
-      .digest("hex");
-
-    const { data: existing } = await supabase
-      .from("portfolio_embeddings")
-      .select("id, checksum")
-      .eq("source_id", project.id)
-      .eq("section", sec.name)
-      .maybeSingle();
-
-    if (existing && existing.checksum === checksum) {
-      // Checksum matches - skip expensive re-embedding call
-      continue;
-    }
-
-    const vector = await generateEmbedding(`${project.title} - ${sec.name}: ${sec.text}`);
-    await supabase.from("portfolio_embeddings").upsert({
-      source_id: project.id,
-      type: "project",
-      title: project.title,
-      slug: `/projects/${project.slug}`,
-      section: sec.name,
-      content: sec.text,
-      embedding: vector,
-      metadata: { tech_stack: project.tech_stack, category: project.category },
-      checksum,
-      updated_at: new Date().toISOString(),
-    });
-  }
-}
-```
-
 ---
 
 #### C. Hybrid Search, Metadata Filtering & Multi-Stage Re-ranking
@@ -504,56 +438,6 @@ Runtime retrieval follows a 3-step pipeline:
    Applies JSONB metadata constraints (e.g. `metadata->'tech_stack' ? 'Flask'`).
 3. **Step 3: Cross-Encoder Re-ranking**:
    Passes the user query and 20 retrieved candidates to a Cross-Encoder model (Cohere Rerank v3 or `bge-reranker-large`). Re-ranks candidates by relevance score and selects the **Top 5** highest quality chunks.
-
-```sql
--- Hybrid Retrieval RPC Function in Supabase
-CREATE OR REPLACE FUNCTION match_portfolio_chunks (
-  query_embedding vector(1536),
-  query_text TEXT,
-  filter_metadata JSONB DEFAULT '{}'::jsonb,
-  match_count INT DEFAULT 20
-)
-RETURNS TABLE (
-  id UUID,
-  type TEXT,
-  source_id UUID,
-  title TEXT,
-  slug TEXT,
-  section TEXT,
-  content TEXT,
-  metadata JSONB,
-  similarity FLOAT
-)
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  RETURN QUERY
-  WITH vector_matches AS (
-    SELECT 
-      pe.id, pe.type, pe.source_id, pe.title, pe.slug, pe.section, pe.content, pe.metadata,
-      1 - (pe.embedding <=> query_embedding) AS similarity
-    FROM portfolio_embeddings pe
-    WHERE (filter_metadata = '{}'::jsonb OR pe.metadata @> filter_metadata)
-    ORDER BY pe.embedding <=> query_embedding ASC
-    LIMIT match_count
-  ),
-  fts_matches AS (
-    SELECT 
-      pe.id, pe.type, pe.source_id, pe.title, pe.slug, pe.section, pe.content, pe.metadata,
-      ts_rank(pe.fts, websearch_to_tsquery('english', query_text)) AS similarity
-    FROM portfolio_embeddings pe
-    WHERE pe.fts @@ websearch_to_tsquery('english', query_text)
-      AND (filter_metadata = '{}'::jsonb OR pe.metadata @> filter_metadata)
-    ORDER BY similarity DESC
-    LIMIT match_count
-  )
-  SELECT * FROM vector_matches
-  UNION ALL
-  SELECT * FROM fts_matches WHERE id NOT IN (SELECT vector_matches.id FROM vector_matches)
-  LIMIT match_count;
-END;
-$$;
-```
 
 ---
 
@@ -618,10 +502,13 @@ To resolve follow-up questions like *"What backend did you use for it?"* after a
 
 ---
 
-#### F. High-Performance Query Caching & Native SSE Streaming
+#### F. High-Performance Distributed Cache Layer & Native SSE Streaming
 
-1. **Redis Query Cache**:
-   Query strings are lowercased, trimmed, and hashed with SHA-256. `Upstash Redis REST` checks key `rag:cache:<hash>`. On cache hit, streams back stored text directly without LLM API calls.
+1. **Portable Distributed Cache Layer**:
+   - Designed around a pluggable key-value caching contract (`CacheProvider`).
+   - Query strings are lowercased, trimmed, and hashed with SHA-256 (`rag:cache:<hash>`).
+   - **Supported Implementations**: Upstash Redis REST, Vercel KV, self-hosted Redis, or local in-memory LRU fallback.
+   - On cache hit, streams back stored text directly without invoking LLM API or vector retrieval.
 2. **Native SSE Byte Streaming**:
    Replaces `answer.split(" ")` with WHATWG `ReadableStream` yielding `Uint8Array` byte chunks formatted as Server-Sent Events (`text/event-stream`). UI decodes chunks using standard streaming response handling or Vercel AI SDK wrappers.
 
@@ -658,7 +545,7 @@ CREATE TABLE IF NOT EXISTS rag_analytics (
 | **Ingestion Pipeline** | **Decoupled API Queue Worker** | PostgreSQL Database Triggers | Avoids database lock contention, reduces DB execution costs, simplifies debugging, and decouples ingestion logic from vendor DB extensions. |
 | **Vector Storage** | **Supabase `pgvector`** | Pinecone, Qdrant | Keeps Supabase as the **single source of truth**. Eliminates multi-database sync overhead, SaaS costs, and data fragmentation. |
 | **Search Strategy** | **Hybrid Search + Cross-Encoder Rerank** | Vector-Only Search | Combines semantic vector similarity with exact lexical matches (FTS) and Cross-Encoder re-ranking, ensuring high precision for technical queries. |
-| **Query Caching** | **Upstash Redis Hash Caching** | In-Memory LRU Cache | Persists query cache across serverless function restarts and edge environments. |
+| **Query Caching** | **Portable Distributed Cache Layer** | Single Provider (Upstash/Redis) | Abstracting cache interfaces allows swapping backends (Upstash Redis, Vercel KV, Redis, In-Memory) without changing application architecture. |
 | **Streaming Protocol** | **Server-Sent Events (`text/event-stream`)** | `answer.split(" ")` text stream | Prevents Markdown parsing errors, UTF-8 chunk truncation, and proxy buffer delays. |
 
 ---
@@ -668,7 +555,7 @@ CREATE TABLE IF NOT EXISTS rag_analytics (
 1. **Phase 1: Supabase `pgvector` Schema Migration**: Run SQL migration establishing `portfolio_embeddings`, HNSW index, FTS index, `match_portfolio_chunks` RPC, and `rag_analytics` table.
 2. **Phase 2: Semantic Chunker & Ingestion Worker**: Develop `lib/rag/semanticChunker.js` and `scripts/seed-embeddings.mjs` to execute section-level chunking and initial vector generation.
 3. **Phase 3: Hybrid Retriever & Reranker Gateway**: Implement `lib/rag/retriever.js` featuring hybrid search, metadata filtering, and optional Cohere/Cross-Encoder re-ranking.
-4. **Phase 4: API Route & Memory Refactor**: Rewrite `app/api/ask/route.js` to integrate Redis caching, query contextualization, prompt building, and SSE streaming.
+4. **Phase 4: API Route, Cache & Memory Refactor**: Rewrite `app/api/ask/route.js` to integrate portable cache layer, query contextualization, prompt building, and SSE streaming.
 5. **Phase 5: UI Stream & Analytics Update**: Refactor `components/AskVedaang.jsx` to process native SSE streams with robust error boundary handling and analytics logging.
 
 ---

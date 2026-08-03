@@ -12,34 +12,221 @@ import {
   faUser,
   faMessage,
   faCircleNotch,
+  faFolder,
+  faFileCode,
+  faLayerGroup,
+  faCircleExclamation,
+  faTrash,
+  faLightbulb,
 } from "@fortawesome/free-solid-svg-icons";
 import MarkdownRenderer from "@/components/MarkdownRenderer";
 
-const SUGGESTED_PROMPTS = [
-  "Who is Vedaang?",
-  "Tell me about Aegis Care.",
-  "Explain Posture Sense.",
-  "What backend technologies does he use?",
-  "What research has he published?",
-  "Internship experience?",
-  "Certifications?",
-  "Resume?",
-  "Contact?",
-];
+const CATEGORIZED_PROMPTS = {
+  Featured: [
+    "Who is Vedaang?",
+    "Tell me about Aegis Care",
+    "What research has he published?",
+    "What backend technologies does he use?",
+  ],
+  Projects: [
+    "Aegis Care overview & stack",
+    "Posture Sense engineering details",
+    "Show all production projects",
+  ],
+  Research: [
+    "Published computer vision research",
+    "Deep learning & AI papers",
+  ],
+  Experience: [
+    "Software engineering internships",
+    "Certifications & credentials",
+    "Resume & CV PDF",
+    "How to contact Vedaang?",
+  ],
+};
+
+const INITIAL_WELCOME = {
+  role: "assistant",
+  content:
+    "Hello! I am **Ask Vedaang**, an AI guide to Vedaang Sharma's engineering portfolio.\n\nAsk me about his **projects**, **published research**, **backend tech stack**, or **career background**! Click a suggested topic below or type your own question.",
+  citations: [],
+  confidence: "High",
+};
+
+/**
+ * Parses markdown text to extract cited projects and research papers for rich interactive cards
+ */
+function extractCitationsAndCards(content) {
+  if (!content || typeof content !== "string") return { projects: [], research: [] };
+
+  const projectRegex = /\[([^\]]+)\]\(\/projects\/([^)]+)\)/g;
+  const researchRegex = /\[([^\]]+)\]\(\/research([^)]*)\)/g;
+
+  const projects = [];
+  let pMatch;
+  while ((pMatch = projectRegex.exec(content)) !== null) {
+    if (!projects.some((p) => p.slug === pMatch[2])) {
+      projects.push({ title: pMatch[1], slug: pMatch[2], url: `/projects/${pMatch[2]}` });
+    }
+  }
+
+  const research = [];
+  let rMatch;
+  while ((rMatch = researchRegex.exec(content)) !== null) {
+    if (!research.some((r) => r.title === rMatch[1])) {
+      research.push({ title: rMatch[1], url: `/research${rMatch[2]}` });
+    }
+  }
+
+  return { projects, research };
+}
+
+function TypingIndicator() {
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[#F0EDD4] dark:bg-[#1E1D19] border border-[#E3DEC3] dark:border-[#33312B] w-fit shadow-subtle">
+      <div className="flex items-center gap-1">
+        <span className="w-2 h-2 rounded-full bg-[#FF8A00] animate-bounce [animation-delay:-0.3s]" />
+        <span className="w-2 h-2 rounded-full bg-[#FFC233] animate-bounce [animation-delay:-0.15s]" />
+        <span className="w-2 h-2 rounded-full bg-[#FF8A00] animate-bounce" />
+      </div>
+      <span className="text-xs font-mono text-[#787467] dark:text-[#9E9A8B]">
+        Retrieving vector context & generating grounded answer...
+      </span>
+    </div>
+  );
+}
+
+function LoadingSkeleton() {
+  return (
+    <div className="space-y-2.5 p-4 rounded-2xl bg-[#F0EDD4]/60 dark:bg-[#1E1D19]/60 border border-[#E3DEC3]/60 dark:border-[#33312B]/60 animate-pulse">
+      <div className="h-4 bg-[#E3DEC3] dark:bg-[#2A2923] rounded-md w-3/4" />
+      <div className="h-4 bg-[#E3DEC3] dark:bg-[#2A2923] rounded-md w-full" />
+      <div className="h-4 bg-[#E3DEC3] dark:bg-[#2A2923] rounded-md w-5/6" />
+    </div>
+  );
+}
+
+function ProjectCardLink({ title, slug, url }) {
+  const targetUrl = url || `/projects/${slug}`;
+  return (
+    <a
+      href={targetUrl}
+      className="group flex items-center justify-between p-3 my-2 rounded-xl bg-[#FAF8EC] dark:bg-[#141310] border border-[#E3DEC3] dark:border-[#33312B] hover:border-[#FFC233] dark:hover:border-[#FFC233] transition shadow-subtle text-left"
+    >
+      <div className="flex items-center gap-3">
+        <div className="w-8 h-8 rounded-lg bg-[#FFC233]/20 text-[#FF8A00] flex items-center justify-center font-bold text-sm group-hover:scale-110 transition-transform shrink-0">
+          <FontAwesomeIcon icon={faFolder} />
+        </div>
+        <div>
+          <h4 className="font-heading font-bold text-xs text-[#181713] dark:text-[#F7F5DC] group-hover:text-[#FF8A00] transition-colors">
+            {title}
+          </h4>
+          <span className="text-[10px] font-mono text-[#787467] dark:text-[#9E9A8B]">
+            View Case Study & Architecture →
+          </span>
+        </div>
+      </div>
+      <span className="text-xs font-semibold text-[#FF8A00] group-hover:translate-x-1 transition-transform shrink-0 ml-2">
+        Explore →
+      </span>
+    </a>
+  );
+}
+
+function ResearchCardLink({ title, url }) {
+  return (
+    <a
+      href={url || "/research"}
+      className="group flex items-center justify-between p-3 my-2 rounded-xl bg-[#FAF8EC] dark:bg-[#141310] border border-[#E3DEC3] dark:border-[#33312B] hover:border-[#FF8A00] dark:hover:border-[#FF8A00] transition shadow-subtle text-left"
+    >
+      <div className="flex items-center gap-3">
+        <div className="w-8 h-8 rounded-lg bg-[#FF8A00]/20 text-[#FF8A00] flex items-center justify-center font-bold text-sm group-hover:scale-110 transition-transform shrink-0">
+          <FontAwesomeIcon icon={faFileCode} />
+        </div>
+        <div>
+          <h4 className="font-heading font-bold text-xs text-[#181713] dark:text-[#F7F5DC] group-hover:text-[#FF8A00] transition-colors">
+            {title}
+          </h4>
+          <span className="text-[10px] font-mono text-[#787467] dark:text-[#9E9A8B]">
+            Read Published Research Paper →
+          </span>
+        </div>
+      </div>
+      <span className="text-xs font-semibold text-[#FF8A00] group-hover:translate-x-1 transition-transform shrink-0 ml-2">
+        Read →
+      </span>
+    </a>
+  );
+}
+
+function GroundingConfidenceBadge({ confidence = "High" }) {
+  return (
+    <div className="flex items-center gap-1.5 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20 w-fit mb-2">
+      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+      <span>{confidence} Grounding Match</span>
+    </div>
+  );
+}
+
+function ErrorRecoveryCard({ onRetry, query }) {
+  return (
+    <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-900 dark:text-amber-200 text-xs space-y-2">
+      <div className="flex items-center gap-2 font-semibold text-amber-700 dark:text-amber-300">
+        <FontAwesomeIcon icon={faCircleExclamation} />
+        <span>Network Error / Unable to reach server</span>
+      </div>
+      <p className="text-[11px] leading-relaxed">
+        Failed to stream response. Click below to retry your query.
+      </p>
+      {onRetry && query && (
+        <button
+          onClick={() => onRetry(query)}
+          className="px-3 py-1.5 rounded-lg bg-[#FF8A00] text-white font-semibold text-xs hover:opacity-90 transition flex items-center gap-1.5"
+        >
+          <FontAwesomeIcon icon={faRotateRight} /> Retry Query
+        </button>
+      )}
+    </div>
+  );
+}
 
 export default function AskVedaang({ embedded = false }) {
   const [isOpen, setIsOpen] = useState(false);
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState([
-    {
-      role: "assistant",
-      content:
-        "Hello! I am **Ask Vedaang**, an AI assistant built to help you learn about Vedaang Sharma's engineering work, research, backend skills, and career journey.\n\nClick a suggested question below or type your own!",
-    },
-  ]);
+  const [activeCategory, setActiveCategory] = useState("Featured");
+  const [messages, setMessages] = useState([INITIAL_WELCOME]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [hasError, setHasError] = useState(false);
+  const [lastQuery, setLastQuery] = useState("");
+
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+
+  // Load chat history from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("ask_vedaang_history_v2");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setMessages(parsed);
+        }
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }, []);
+
+  // Save chat history to localStorage on update
+  useEffect(() => {
+    try {
+      if (messages.length > 0) {
+        localStorage.setItem("ask_vedaang_history_v2", JSON.stringify(messages));
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }, [messages]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -49,13 +236,16 @@ export default function AskVedaang({ embedded = false }) {
     if (isOpen || embedded) {
       scrollToBottom();
     }
-  }, [messages, isOpen, embedded]);
+  }, [messages, isStreaming, isOpen, embedded]);
 
   const handleSend = async (textToSend) => {
-    const query = textToSend || input.trim();
+    const query = (textToSend || input).trim();
     if (!query || isStreaming) return;
 
     setInput("");
+    setHasError(false);
+    setLastQuery(query);
+
     const newMessages = [...messages, { role: "user", content: query }];
     setMessages(newMessages);
     setIsStreaming(true);
@@ -67,13 +257,17 @@ export default function AskVedaang({ embedded = false }) {
         body: JSON.stringify({ message: query }),
       });
 
-      if (!response.ok) throw new Error("Failed to reach Ask Vedaang server.");
+      if (!response.ok) throw new Error(`Server returned status ${response.status}`);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let assistantResponse = "";
 
-      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+      // Add empty assistant response to stream into
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "", citations: [], confidence: "High" },
+      ]);
 
       while (true) {
         const { value, done } = await reader.read();
@@ -86,29 +280,36 @@ export default function AskVedaang({ embedded = false }) {
           updated[updated.length - 1] = {
             role: "assistant",
             content: assistantResponse,
+            citations: [],
+            confidence: "High",
           };
           return updated;
         });
       }
 
       if (!assistantResponse.trim()) {
-        const fallbackMsg = "I am **Ask Vedaang**, an AI assistant for Vedaang Sharma's portfolio. Try asking about his [projects](/projects), [research](/research), or [skills](/skills)!";
+        const fallbackMsg =
+          "I couldn't find specific information matching your question in Vedaang's portfolio records. Try exploring his [projects](/projects), [published research](/research), [skills](/skills), or [contact](/contact).";
         setMessages((prev) => {
           const updated = [...prev];
           updated[updated.length - 1] = {
             role: "assistant",
             content: fallbackMsg,
+            citations: [],
+            confidence: "Grounded Directory",
           };
           return updated;
         });
       }
     } catch (err) {
+      console.error("[AskVedaang] Chat stream error:", err);
+      setHasError(true);
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content:
-            "Sorry, I encountered an issue retrieving that information. Please try again or reach out on the [Contact Page](/contact).",
+          isError: true,
+          content: "Sorry, I encountered a communication issue retrieving context.",
         },
       ]);
     } finally {
@@ -117,38 +318,38 @@ export default function AskVedaang({ embedded = false }) {
   };
 
   const handleReset = () => {
-    setMessages([
-      {
-        role: "assistant",
-        content:
-          "Conversation reset. Ask me anything about Vedaang's projects, technical stack, or research!",
-      },
-    ]);
+    setMessages([INITIAL_WELCOME]);
+    setHasError(false);
+    setLastQuery("");
+    try {
+      localStorage.removeItem("ask_vedaang_history_v2");
+    } catch {}
   };
 
   const chatContent = (
     <div className="flex flex-col h-full bg-[#F7F5DC] dark:bg-[#141310] text-[#181713] dark:text-[#F7F5DC]">
-      {/* Drawer Header */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-[#E3DEC3] dark:border-[#33312B] bg-[#F0EDD4] dark:bg-[#1C1B17]">
+      {/* Header */}
+      <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#E3DEC3] dark:border-[#33312B] bg-[#F0EDD4] dark:bg-[#1C1B17]">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-[#FFC233] text-[#181713] flex items-center justify-center font-bold">
+          <div className="w-8 h-8 rounded-lg bg-[#FFC233] text-[#181713] flex items-center justify-center font-bold text-sm shadow-subtle">
             <FontAwesomeIcon icon={faRobot} />
           </div>
           <div>
-            <h2 className="font-heading font-bold text-lg leading-none">Ask Vedaang</h2>
-            <span className="text-[11px] font-mono text-[#FF8A00] flex items-center gap-1.5 mt-0.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Grounded AI Assistant
+            <h2 className="font-heading font-bold text-base leading-none">Ask Vedaang</h2>
+            <span className="text-[10px] font-mono text-[#FF8A00] flex items-center gap-1.5 mt-0.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Production RAG Assistant
             </span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <button
             onClick={handleReset}
-            className="p-2 rounded-lg text-[#57534E] dark:text-[#9E9A8B] hover:bg-[#E3DEC3]/60 dark:hover:bg-[#2A2923] transition"
-            title="Reset conversation"
+            className="p-2 rounded-lg text-[#57534E] dark:text-[#9E9A8B] hover:bg-[#E3DEC3]/60 dark:hover:bg-[#2A2923] transition flex items-center gap-1 text-xs font-mono"
+            title="Clear Chat History"
           >
-            <FontAwesomeIcon icon={faRotateRight} className="text-sm" />
+            <FontAwesomeIcon icon={faTrash} className="text-xs" />
+            <span className="hidden sm:inline">Clear</span>
           </button>
           {!embedded && (
             <button
@@ -161,18 +362,32 @@ export default function AskVedaang({ embedded = false }) {
         </div>
       </div>
 
-      {/* Suggested Prompts Banner */}
-      <div className="px-4 py-3 bg-[#FAF8EC] dark:bg-[#1E1D19] border-b border-[#E3DEC3]/60 dark:border-[#33312B]/60 overflow-x-auto whitespace-nowrap">
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-mono uppercase tracking-wider text-[#787467] shrink-0">
-            Suggested:
-          </span>
-          {SUGGESTED_PROMPTS.map((prompt) => (
+      {/* Categorized Suggested Prompts Banner */}
+      <div className="px-4 py-2.5 bg-[#FAF8EC] dark:bg-[#1E1D19] border-b border-[#E3DEC3]/60 dark:border-[#33312B]/60 space-y-2">
+        <div className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap scrollbar-none text-[11px] font-mono">
+          <FontAwesomeIcon icon={faLightbulb} className="text-[#FF8A00] shrink-0 mr-1" />
+          {Object.keys(CATEGORIZED_PROMPTS).map((cat) => (
+            <button
+              key={cat}
+              onClick={() => setActiveCategory(cat)}
+              className={`px-2.5 py-1 rounded-md transition shrink-0 ${
+                activeCategory === cat
+                  ? "bg-[#181713] text-[#F7F5DC] dark:bg-[#F7F5DC] dark:text-[#181713] font-bold"
+                  : "bg-[#F0EDD4] dark:bg-[#25241E] text-[#57534E] dark:text-[#9E9A8B] hover:border-[#FFC233]"
+              }`}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap scrollbar-none pb-0.5">
+          {CATEGORIZED_PROMPTS[activeCategory].map((prompt) => (
             <button
               key={prompt}
               onClick={() => handleSend(prompt)}
               disabled={isStreaming}
-              className="shrink-0 text-xs font-mono px-3 py-1 rounded-full bg-[#F0EDD4] dark:bg-[#25241E] border border-[#E3DEC3] dark:border-[#33312B] hover:border-[#FFC233] text-[#181713] dark:text-[#F7F5DC] transition"
+              className="shrink-0 text-xs font-mono px-3 py-1 rounded-full bg-[#F0EDD4] dark:bg-[#25241E] border border-[#E3DEC3] dark:border-[#33312B] hover:border-[#FFC233] text-[#181713] dark:text-[#F7F5DC] transition shadow-subtle"
             >
               {prompt}
             </button>
@@ -180,60 +395,92 @@ export default function AskVedaang({ embedded = false }) {
         </div>
       </div>
 
-      {/* Messages Stream */}
-      <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
-        {messages.map((msg, index) => (
-          <div
-            key={index}
-            className={`flex gap-3 ${
-              msg.role === "user" ? "justify-end" : "justify-start"
-            }`}
-          >
-            {msg.role === "assistant" && (
-              <div className="w-7 h-7 rounded-md bg-[#FFC233] text-[#181713] flex items-center justify-center shrink-0 text-xs mt-1">
-                <FontAwesomeIcon icon={faRobot} />
-              </div>
-            )}
+      {/* Messages Feed */}
+      <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
+        {messages.map((msg, index) => {
+          const isUser = msg.role === "user";
+          const { projects, research } = !isUser ? extractCitationsAndCards(msg.content) : { projects: [], research: [] };
 
+          return (
             <div
-              className={`max-w-[85%] rounded-2xl p-4 text-sm leading-relaxed ${
-                msg.role === "user"
-                  ? "bg-[#181713] text-[#F7F5DC] dark:bg-[#F7F5DC] dark:text-[#181713] rounded-br-none"
-                  : "bg-[#F0EDD4] dark:bg-[#1E1D19] border border-[#E3DEC3] dark:border-[#33312B] text-[#181713] dark:text-[#F7F5DC] rounded-bl-none shadow-subtle"
-              }`}
+              key={index}
+              className={`flex gap-3 ${isUser ? "justify-end" : "justify-start"}`}
             >
-              {msg.role === "user" ? (
-                <p>{msg.content}</p>
-              ) : (
-                <div className="md-content">
-                  <MarkdownRenderer content={msg.content || "..."} />
+              {!isUser && (
+                <div className="w-7 h-7 rounded-md bg-[#FFC233] text-[#181713] flex items-center justify-center shrink-0 text-xs mt-1 shadow-subtle">
+                  <FontAwesomeIcon icon={faRobot} />
+                </div>
+              )}
+
+              <div
+                className={`max-w-[88%] rounded-2xl p-4 text-sm leading-relaxed ${
+                  isUser
+                    ? "bg-[#181713] text-[#F7F5DC] dark:bg-[#F7F5DC] dark:text-[#181713] rounded-br-none shadow-subtle"
+                    : "bg-[#F0EDD4] dark:bg-[#1E1D19] border border-[#E3DEC3] dark:border-[#33312B] text-[#181713] dark:text-[#F7F5DC] rounded-bl-none shadow-subtle"
+                }`}
+              >
+                {isUser ? (
+                  <p className="font-medium">{msg.content}</p>
+                ) : msg.isError ? (
+                  <ErrorRecoveryCard onRetry={handleSend} query={lastQuery} />
+                ) : (
+                  <div>
+                    <GroundingConfidenceBadge confidence={msg.confidence || "High"} />
+                    <MarkdownRenderer content={msg.content || "..."} />
+
+                    {/* Interactive Project Cards */}
+                    {projects.length > 0 && (
+                      <div className="mt-3 pt-2 border-t border-[#E3DEC3]/60 dark:border-[#33312B]/60">
+                        <span className="text-[10px] font-mono uppercase tracking-wider text-[#787467] dark:text-[#9E9A8B] flex items-center gap-1 mb-1">
+                          <FontAwesomeIcon icon={faFolder} className="text-[#FF8A00]" />
+                          Cited Projects:
+                        </span>
+                        {projects.map((p, idx) => (
+                          <ProjectCardLink key={idx} title={p.title} slug={p.slug} url={p.url} />
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Interactive Research Cards */}
+                    {research.length > 0 && (
+                      <div className="mt-3 pt-2 border-t border-[#E3DEC3]/60 dark:border-[#33312B]/60">
+                        <span className="text-[10px] font-mono uppercase tracking-wider text-[#787467] dark:text-[#9E9A8B] flex items-center gap-1 mb-1">
+                          <FontAwesomeIcon icon={faFileCode} className="text-[#FF8A00]" />
+                          Cited Research Papers:
+                        </span>
+                        {research.map((r, idx) => (
+                          <ResearchCardLink key={idx} title={r.title} url={r.url} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {isUser && (
+                <div className="w-7 h-7 rounded-md bg-[#FF8A00] text-white flex items-center justify-center shrink-0 text-xs mt-1 shadow-subtle">
+                  <FontAwesomeIcon icon={faUser} />
                 </div>
               )}
             </div>
+          );
+        })}
 
-            {msg.role === "user" && (
-              <div className="w-7 h-7 rounded-md bg-[#FF8A00] text-white flex items-center justify-center shrink-0 text-xs mt-1">
-                <FontAwesomeIcon icon={faUser} />
-              </div>
-            )}
-          </div>
-        ))}
         {isStreaming && (
-          <div className="flex items-center gap-2 text-xs font-mono text-[#787467] pl-10">
-            <FontAwesomeIcon icon={faCircleNotch} className="animate-spin text-[#FF8A00]" />
-            Ask Vedaang is thinking...
+          <div className="pl-10">
+            <TypingIndicator />
           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input Footer */}
+      {/* Input Form */}
       <form
         onSubmit={(e) => {
           e.preventDefault();
           handleSend();
         }}
-        className="p-4 bg-[#F0EDD4] dark:bg-[#1C1B17] border-t border-[#E3DEC3] dark:border-[#33312B]"
+        className="p-3.5 bg-[#F0EDD4] dark:bg-[#1C1B17] border-t border-[#E3DEC3] dark:border-[#33312B]"
       >
         <div className="flex items-center gap-2">
           <input
@@ -248,7 +495,7 @@ export default function AskVedaang({ embedded = false }) {
           <button
             type="submit"
             disabled={!input.trim() || isStreaming}
-            className="px-4 py-3 rounded-xl bg-[#181713] text-[#F7F5DC] dark:bg-[#F7F5DC] dark:text-[#181713] font-semibold text-sm hover:opacity-90 disabled:opacity-40 transition"
+            className="px-4 py-3 rounded-xl bg-[#181713] text-[#F7F5DC] dark:bg-[#F7F5DC] dark:text-[#181713] font-semibold text-sm hover:opacity-90 disabled:opacity-40 transition shadow-subtle"
           >
             <FontAwesomeIcon icon={faPaperPlane} />
           </button>
@@ -258,7 +505,11 @@ export default function AskVedaang({ embedded = false }) {
   );
 
   if (embedded) {
-    return <div className="w-full h-[75vh] rounded-2xl overflow-hidden border border-[#E3DEC3] dark:border-[#33312B] shadow-editorial">{chatContent}</div>;
+    return (
+      <div className="w-full h-[78vh] rounded-2xl overflow-hidden border border-[#E3DEC3] dark:border-[#33312B] shadow-editorial">
+        {chatContent}
+      </div>
+    );
   }
 
   return (

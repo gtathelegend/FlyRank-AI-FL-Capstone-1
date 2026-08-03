@@ -122,9 +122,11 @@ function parseMarkdown(md) {
   return blocks;
 }
 
-export default function MarkdownRenderer({ children }) {
-  if (!children) return null;
-  const blocks = parseMarkdown(children);
+export default function MarkdownRenderer({ content, children }) {
+  const text = content || (typeof children === "string" ? children : "");
+  if (!text) return null;
+  const blocks = parseMarkdown(text);
+
 
   return (
     <div className="md-content">

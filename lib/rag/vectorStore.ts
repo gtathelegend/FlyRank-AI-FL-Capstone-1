@@ -148,41 +148,115 @@ export async function deleteObsoleteVectorRecords(activeDocumentIds: string[]): 
 }
 
 /**
- * Searches for most similar vector records matching query embedding using match_portfolio_embeddings RPC.
+ * Computes cosine similarity score between two numeric vectors.
+ */
+export function calculateCosineSimilarity(vecA: number[], vecB: number[]): number {
+  if (!vecA || !vecB || vecA.length === 0 || vecB.length === 0 || vecA.length !== vecB.length) {
+    return 0;
+  }
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dot += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  const mag = Math.sqrt(normA) * Math.sqrt(normB);
+  if (mag === 0) return 0;
+  return dot / mag;
+}
+
+/**
+ * Searches for most similar vector records matching query embedding using match_portfolio_embeddings RPC or table query.
  */
 export async function searchSimilarVectors(
   queryEmbedding: number[],
   matchCount = 5,
-  matchThreshold = 0.0
+  matchThreshold = 0.0,
+  filterTypes: string[] = []
 ): Promise<VectorSearchResult[]> {
   try {
     const admin = createAdminClient();
-    const { data, error } = await admin.rpc("match_portfolio_embeddings", {
+    const cleanTypes = (filterTypes || []).filter(Boolean).map((t) => t.toLowerCase());
+
+    // 1. Attempt RPC call
+    const rpcParams: Record<string, any> = {
       query_embedding: queryEmbedding,
       match_threshold: matchThreshold,
       match_count: matchCount,
-    });
+    };
+    if (cleanTypes.length > 0) {
+      rpcParams.filter_types = cleanTypes;
+    }
 
-    if (error) {
-      console.warn("[vectorStore] RPC match_portfolio_embeddings warning:", error.message);
+    const { data: rpcData, error: rpcError } = await admin.rpc("match_portfolio_embeddings", rpcParams);
+
+    if (!rpcError && rpcData && rpcData.length > 0) {
+      return rpcData.map((row: any) => ({
+        id: row.id,
+        documentId: row.document_id || row.documentId || "",
+        type: row.type,
+        title: row.title,
+        section: row.section || "Overview",
+        content: row.content,
+        summary: row.summary || "",
+        tags: row.tags || [],
+        url: row.url || "",
+        metadata: row.metadata || {},
+        similarity: row.similarity ?? 0,
+      }));
+    }
+
+    // 2. Fallback: Query table directly if RPC fails or returns 0 results
+    let query = admin.from("portfolio_embeddings").select("*");
+    if (cleanTypes.length > 0) {
+      query = query.in("type", cleanTypes);
+    }
+
+    const { data: tableData, error: tableError } = await query;
+
+    if (tableError || !tableData || tableData.length === 0) {
+      if (rpcError) {
+        console.warn("[vectorStore] RPC match_portfolio_embeddings notice:", rpcError.message);
+      }
       return [];
     }
 
-    return (data || []).map((row: any) => ({
-      id: row.id,
-      documentId: row.document_id,
-      type: row.type,
-      title: row.title,
-      section: row.section || "Overview",
-      content: row.content,
-      summary: row.summary || "",
-      tags: row.tags || [],
-      url: row.url || "",
-      metadata: row.metadata || {},
-      similarity: row.similarity ?? 0,
-    }));
+    // Compute cosine similarity manually for table rows
+    const scored = tableData
+      .map((row: any) => {
+        let rawVec = row.embedding;
+        if (typeof rawVec === "string") {
+          try {
+            rawVec = JSON.parse(rawVec);
+          } catch {
+            rawVec = [];
+          }
+        }
+        const sim = calculateCosineSimilarity(queryEmbedding, rawVec || []);
+        return {
+          id: row.id,
+          documentId: row.document_id || row.documentId || "",
+          type: row.type,
+          title: row.title,
+          section: row.section || "Overview",
+          content: row.content,
+          summary: row.summary || "",
+          tags: row.tags || [],
+          url: row.url || "",
+          metadata: row.metadata || {},
+          similarity: sim,
+        };
+      })
+      .filter((item) => item.similarity >= matchThreshold)
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, matchCount);
+
+    return scored;
   } catch (err) {
     console.error("[vectorStore] Error executing similarity search:", err);
     return [];
   }
 }
+

@@ -39,7 +39,8 @@ ON portfolio_embeddings USING gin(fts);
 CREATE OR REPLACE FUNCTION match_portfolio_embeddings(
   query_embedding vector,
   match_threshold float DEFAULT 0.0,
-  match_count int DEFAULT 5
+  match_count int DEFAULT 5,
+  filter_types text[] DEFAULT NULL
 )
 RETURNS TABLE (
   id UUID,
@@ -72,7 +73,9 @@ BEGIN
     1 - (pe.embedding <=> query_embedding) AS similarity
   FROM portfolio_embeddings pe
   WHERE 1 - (pe.embedding <=> query_embedding) >= match_threshold
+    AND (filter_types IS NULL OR cardinality(filter_types) = 0 OR pe.type = ANY(filter_types))
   ORDER BY pe.embedding <=> query_embedding ASC
   LIMIT match_count;
 END;
 $$;
+

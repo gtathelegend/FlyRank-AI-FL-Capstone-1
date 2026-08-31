@@ -100,13 +100,17 @@ export async function POST(request) {
 			text,
 			html,
 		});
-		const posthog = getPostHogClient();
-		// Use a non-PII distinct id; keep the email out of the identity graph.
-		posthog.capture({
-			distinctId: `contact:${ip}`,
-			event: "contact_email_sent",
-			properties: { has_subject: !!subject },
-		});
+		try {
+			const posthog = getPostHogClient();
+			// Use a non-PII distinct id; keep the email out of the identity graph.
+			posthog?.capture({
+				distinctId: `contact:${ip}`,
+				event: "contact_email_sent",
+				properties: { has_subject: !!subject },
+			});
+		} catch (phErr) {
+			console.warn("[POST /api/contact] PostHog capture error:", phErr?.message || phErr);
+		}
 		return NextResponse.json({ ok: true });
 	} catch (err) {
 		console.error("[POST /api/contact] sendMail failed:", err?.message || err);

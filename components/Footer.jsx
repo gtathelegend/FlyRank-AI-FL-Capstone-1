@@ -3,6 +3,8 @@ import { motion } from "framer-motion";
 import Link from "next/link";
 import Container from "@/components/ui/Container";
 
+import { FlyRankBadge } from "@/components/ui";
+
 const FOOTER_LINKS = [
 	{
 		group: "Pages",
@@ -68,9 +70,9 @@ export default function Footer() {
 			{/* Link columns */}
 			<div className="py-12">
 				<Container size="lg">
-					<div className="grid grid-cols-2 md:grid-cols-4 gap-8">
+					<div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-8 items-start">
 						{/* Brand column */}
-						<div className="col-span-2 md:col-span-1">
+						<div className="col-span-1">
 							<Link href="/" className="font-heading font-bold text-lg text-[#181713] dark:text-[#F7F5DC] block mb-1">
 								Vedaang Sharma
 							</Link>
@@ -110,6 +112,14 @@ export default function Footer() {
 								</ul>
 							</div>
 						))}
+
+						{/* Credential column */}
+						<div>
+							<p className="text-xs font-mono font-bold uppercase tracking-wider text-[#FF8A00] dark:text-[#FFC233] mb-3">
+								Credential
+							</p>
+							<FlyRankBadge />
+						</div>
 					</div>
 				</Container>
 			</div>

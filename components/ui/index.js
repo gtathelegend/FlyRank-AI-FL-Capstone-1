@@ -12,3 +12,5 @@ export { default as PublicationCard } from "./PublicationCard";
 export { default as PageTransition } from "./PageTransition";
 export { default as Skeleton, CardSkeleton } from "./Skeleton";
 export { default as EmptyState } from "./EmptyState";
+export { default as FlyRankBadge } from "./FlyRankBadge";
+
